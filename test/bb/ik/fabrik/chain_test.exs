@@ -5,6 +5,8 @@
 defmodule BB.IK.FABRIK.ChainTest do
   use ExUnit.Case, async: true
 
+  alias BB.Error.Kinematics.NoDofs
+  alias BB.Error.Kinematics.UnknownLink
   alias BB.IK.FABRIK.Chain
   alias BB.IK.TestHelpers.Chain, as: ChainHelpers
   alias BB.IK.TestRobots.FixedOnlyChain
@@ -29,14 +31,16 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      assert {:error, :unknown_link} = Chain.build(robot, positions, :nonexistent)
+      assert {:error, %UnknownLink{target_link: :nonexistent}} =
+               Chain.build(robot, positions, :nonexistent)
     end
 
     test "returns error for chain with only fixed joints" do
       robot = FixedOnlyChain.robot()
       positions = %{}
 
-      assert {:error, :no_dofs} = Chain.build(robot, positions, :end_link)
+      assert {:error, %NoDofs{target_link: :end_link}} =
+               Chain.build(robot, positions, :end_link)
     end
 
     test "filters out fixed joints from chain" do
