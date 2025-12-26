@@ -5,6 +5,8 @@
 defmodule BB.IK.FABRIK.Chain do
   @moduledoc false
 
+  alias BB.Error.Kinematics.NoDofs
+  alias BB.Error.Kinematics.UnknownLink
   alias BB.Robot
   alias BB.Robot.{Joint, Kinematics, Transform}
 
@@ -43,15 +45,15 @@ defmodule BB.IK.FABRIK.Chain do
   ## Returns
 
   - `{:ok, chain}` - Successfully built chain
-  - `{:error, :unknown_link}` - Target link not found
-  - `{:error, :no_dofs}` - Chain has no movable joints
+  - `{:error, %UnknownLink{}}` - Target link not found
+  - `{:error, %NoDofs{}}` - Chain has no movable joints
   """
   @spec build(Robot.t(), %{atom() => float()}, atom()) ::
-          {:ok, t()} | {:error, :unknown_link | :no_dofs}
+          {:ok, t()} | {:error, UnknownLink.t() | NoDofs.t()}
   def build(%Robot{} = robot, positions, target_link) when is_map(positions) do
     case Robot.path_to(robot, target_link) do
       nil ->
-        {:error, :unknown_link}
+        {:error, %UnknownLink{target_link: target_link}}
 
       path ->
         # Get all joints in the path
@@ -70,7 +72,7 @@ defmodule BB.IK.FABRIK.Chain do
         movable_joints = Enum.filter(all_joints, &Joint.movable?/1)
 
         if Enum.empty?(movable_joints) do
-          {:error, :no_dofs}
+          {:error, %NoDofs{target_link: target_link, chain_length: length(path)}}
         else
           chain =
             build_chain_data(robot, positions, movable_joints, movable_joint_names, target_link)

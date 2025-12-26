@@ -30,9 +30,8 @@ defmodule BB.IK.FABRIK do
           BB.Robot.State.set_positions(state, positions)
           IO.puts("Solved in \#{meta.iterations} iterations")
 
-        {:error, :unreachable, meta} ->
-          # Still get best-effort positions
-          IO.puts("Target unreachable, residual: \#{meta.residual}m")
+        {:error, %BB.Error.Kinematics.Unreachable{residual: residual}} ->
+          IO.puts("Target unreachable, residual: \#{residual}m")
       end
 
   ## Options
@@ -50,6 +49,8 @@ defmodule BB.IK.FABRIK do
 
   @behaviour BB.IK.Solver
 
+  alias BB.Error.Kinematics.NoSolution
+  alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK.{Chain, Math}
   alias BB.Robot
   alias BB.Robot.{Kinematics, State, Transform}
@@ -75,9 +76,8 @@ defmodule BB.IK.FABRIK do
     target_point = normalize_target(target)
 
     case Chain.build(robot, positions, target_link) do
-      {:error, reason} ->
-        # Return 3-element error tuple to match solve_result type
-        {:error, reason, %{iterations: 0, residual: 0.0, reached: false, reason: reason}}
+      {:error, error} ->
+        {:error, error}
 
       {:ok, chain} ->
         result =
@@ -94,28 +94,43 @@ defmodule BB.IK.FABRIK do
             meta = %{
               iterations: fabrik_meta.iterations,
               residual: residual,
-              reached: true,
-              reason: :converged
+              reached: true
             }
 
             {:ok, merged_positions, meta}
 
-          {:error, reason, fabrik_meta} ->
+          {:error, :unreachable, fabrik_meta} ->
             joint_positions =
               Chain.points_to_positions(robot, chain, fabrik_meta.points, respect_limits?)
 
             merged_positions = Map.merge(positions, joint_positions)
             residual = compute_residual(robot, merged_positions, target_link, target_point)
 
-            meta = %{
-              iterations: fabrik_meta.iterations,
-              residual: residual,
-              reached: false,
-              reason: reason,
-              positions: merged_positions
-            }
+            {:error,
+             %Unreachable{
+               target_link: target_link,
+               target_pose: target,
+               reason: "Target beyond workspace",
+               iterations: fabrik_meta.iterations,
+               residual: residual,
+               positions: merged_positions
+             }}
 
-            {:error, reason, meta}
+          {:error, :max_iterations, fabrik_meta} ->
+            joint_positions =
+              Chain.points_to_positions(robot, chain, fabrik_meta.points, respect_limits?)
+
+            merged_positions = Map.merge(positions, joint_positions)
+            residual = compute_residual(robot, merged_positions, target_link, target_point)
+
+            {:error,
+             %NoSolution{
+               target_link: target_link,
+               target_pose: target,
+               iterations: fabrik_meta.iterations,
+               residual: residual,
+               positions: merged_positions
+             }}
         end
     end
   end
@@ -138,7 +153,7 @@ defmodule BB.IK.FABRIK do
         State.set_positions(state, positions)
         {:ok, positions, meta}
 
-      {:error, _reason, _meta} = error ->
+      {:error, _error} = error ->
         error
     end
   end

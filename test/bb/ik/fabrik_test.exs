@@ -5,6 +5,9 @@
 defmodule BB.IK.FABRIKTest do
   use ExUnit.Case, async: true
 
+  alias BB.Error.Kinematics.NoDofs
+  alias BB.Error.Kinematics.UnknownLink
+  alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK
   alias BB.IK.TestRobots.ContinuousJointArm
   alias BB.IK.TestRobots.FixedOnlyChain
@@ -28,7 +31,6 @@ defmodule BB.IK.FABRIKTest do
                FABRIK.solve(robot, positions, :tip, target)
 
       assert meta.reached == true
-      assert meta.reason == :converged
       assert meta.residual < 0.01
 
       # Verify the FK produces the target position
@@ -66,37 +68,30 @@ defmodule BB.IK.FABRIKTest do
       # Target way beyond reach (arm can only reach ~0.5m)
       target = {1.0, 0.0, 0.0}
 
-      assert {:error, :unreachable, meta} =
+      assert {:error, %Unreachable{} = error} =
                FABRIK.solve(robot, positions, :tip, target)
 
-      assert meta.reached == false
-      assert meta.reason == :unreachable
-      assert meta.residual > 0.4
+      assert error.target_link == :tip
+      assert error.residual > 0.4
 
       # Should still return best-effort positions
-      assert Map.has_key?(meta, :positions)
+      assert is_map(error.positions)
     end
 
     test "returns error for unknown target link" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      assert {:error, :unknown_link, meta} =
+      assert {:error, %UnknownLink{target_link: :nonexistent_link}} =
                FABRIK.solve(robot, positions, :nonexistent_link, {0.3, 0.0, 0.0})
-
-      assert meta.reason == :unknown_link
-      assert meta.reached == false
     end
 
     test "returns error for chain with no movable joints" do
       robot = FixedOnlyChain.robot()
       positions = %{}
 
-      assert {:error, :no_dofs, meta} =
+      assert {:error, %NoDofs{target_link: :end_link}} =
                FABRIK.solve(robot, positions, :end_link, {0.0, 0.0, 0.1})
-
-      assert meta.reason == :no_dofs
-      assert meta.reached == false
     end
 
     test "works with BB.Robot.State" do
@@ -204,7 +199,7 @@ defmodule BB.IK.FABRIKTest do
       # Unreachable target
       target = {10.0, 0.0, 0.0}
 
-      assert {:error, :unreachable, _meta} =
+      assert {:error, %Unreachable{}} =
                FABRIK.solve_and_update(robot, state, :tip, target)
 
       # State should be unchanged

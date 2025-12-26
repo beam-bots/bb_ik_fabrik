@@ -207,7 +207,12 @@ defmodule BB.IK.FABRIK.Tracker do
             last_update: DateTime.utc_now()
         }
 
-      {:error, _reason, meta} ->
+      {:error, error} ->
+        meta = %{
+          residual: Map.get(error, :residual),
+          iterations: Map.get(error, :iterations, 0)
+        }
+
         %{state | last_meta: meta}
     end
   end
