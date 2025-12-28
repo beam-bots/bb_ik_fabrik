@@ -6,6 +6,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
   use ExUnit.Case, async: true
 
   alias BB.IK.FABRIK.Tracker
+  alias BB.Vec3
 
   defmodule TrackerTestRobot do
     @moduledoc false
@@ -79,7 +80,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
                Tracker.start_link(
                  robot: TrackerTestRobot,
                  target_link: :tip,
-                 initial_target: {0.35, 0.2, 0.0}
+                 initial_target: Vec3.new(0.35, 0.2, 0.0)
                )
 
       assert Process.alive?(pid)
@@ -93,7 +94,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
                Tracker.start_link(
                  robot: TrackerTestRobot,
                  target_link: :tip,
-                 initial_target: {0.35, 0.2, 0.0},
+                 initial_target: Vec3.new(0.35, 0.2, 0.0),
                  name: :test_tracker
                )
 
@@ -110,13 +111,13 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0}
+          initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
-      assert {:ok, _state} = Tracker.update_target(pid, {0.3, 0.3, 0.0})
+      assert {:ok, _state} = Tracker.update_target(pid, Vec3.new(0.3, 0.3, 0.0))
 
       status = Tracker.status(pid)
-      assert status.target == {0.3, 0.3, 0.0}
+      assert status.target == Vec3.new(0.3, 0.3, 0.0)
 
       Tracker.stop(pid)
     end
@@ -130,7 +131,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0},
+          initial_target: Vec3.new(0.35, 0.2, 0.0),
           update_rate: 10
         )
 
@@ -140,7 +141,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
       status = Tracker.status(pid)
 
       assert status.tracking == true
-      assert status.target == {0.35, 0.2, 0.0}
+      assert status.target == Vec3.new(0.35, 0.2, 0.0)
       assert status.update_rate == 10
       assert is_integer(status.iterations)
 
@@ -156,7 +157,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0}
+          initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
       # Give it a moment to solve
@@ -176,7 +177,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0}
+          initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
       Process.sleep(100)
@@ -194,7 +195,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0},
+          initial_target: Vec3.new(0.35, 0.2, 0.0),
           update_rate: 20
         )
 
@@ -202,10 +203,10 @@ defmodule BB.IK.FABRIK.TrackerTest do
       Process.sleep(100)
 
       status1 = Tracker.status(pid)
-      assert status1.target == {0.35, 0.2, 0.0}
+      assert status1.target == Vec3.new(0.35, 0.2, 0.0)
 
       # Update to a new target
-      Tracker.update_target(pid, {0.25, 0.25, 0.0})
+      Tracker.update_target(pid, Vec3.new(0.25, 0.25, 0.0))
 
       # Let it track the new target
       Process.sleep(100)
@@ -213,7 +214,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
       status2 = Tracker.status(pid)
 
       # Target should have changed
-      assert status2.target == {0.25, 0.25, 0.0}
+      assert status2.target == Vec3.new(0.25, 0.25, 0.0)
 
       # Should still be tracking
       assert status2.tracking == true
@@ -230,7 +231,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
-          initial_target: {0.35, 0.2, 0.0},
+          initial_target: Vec3.new(0.35, 0.2, 0.0),
           max_iterations: 10,
           tolerance: 0.01,
           respect_limits: true

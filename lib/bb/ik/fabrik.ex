@@ -52,8 +52,10 @@ defmodule BB.IK.FABRIK do
   alias BB.Error.Kinematics.NoSolution
   alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK.{Chain, Math}
+  alias BB.Quaternion
   alias BB.Robot
   alias BB.Robot.{Kinematics, State, Transform}
+  alias BB.Vec3
 
   @default_max_iterations 50
   @default_tolerance 1.0e-4
@@ -73,7 +75,7 @@ defmodule BB.IK.FABRIK do
     tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
     respect_limits? = Keyword.get(opts, :respect_limits, true)
 
-    target_point = normalize_target(target)
+    {target_point, _orientation_target} = normalize_target(target)
 
     case Chain.build(robot, positions, target_link) do
       {:error, error} ->
@@ -94,6 +96,7 @@ defmodule BB.IK.FABRIK do
             meta = %{
               iterations: fabrik_meta.iterations,
               residual: residual,
+              orientation_residual: nil,
               reached: true
             }
 
@@ -158,24 +161,31 @@ defmodule BB.IK.FABRIK do
     end
   end
 
-  defp normalize_target({x, y, z}) when is_number(x) and is_number(y) and is_number(z) do
-    Nx.tensor([x, y, z], type: :f64)
+  # Returns {position_tensor, orientation_target}
+  defp normalize_target(%Vec3{} = vec) do
+    {Vec3.tensor(vec), :none}
+  end
+
+  defp normalize_target({%Vec3{} = vec, orientation}) do
+    {Vec3.tensor(vec), normalize_orientation(orientation)}
   end
 
   defp normalize_target(%Nx.Tensor{} = tensor) do
     case Nx.shape(tensor) do
       {4, 4} ->
-        {x, y, z} = Transform.get_translation(tensor)
-        Nx.tensor([x, y, z], type: :f64)
-
-      {3} ->
-        Nx.as_type(tensor, :f64)
+        pos_vec = Transform.get_translation_vec3(tensor)
+        orientation = {:quaternion, Transform.get_quaternion(tensor)}
+        {Vec3.tensor(pos_vec), orientation}
 
       shape ->
         raise ArgumentError,
-              "Invalid target shape #{inspect(shape)}. Expected {3} or {4, 4}."
+              "Invalid target tensor shape #{inspect(shape)}. Expected {4, 4}."
     end
   end
+
+  defp normalize_orientation(:none), do: :none
+  defp normalize_orientation({:axis, %Vec3{} = vec}), do: {:axis, vec}
+  defp normalize_orientation({:quaternion, %Quaternion{} = q}), do: {:quaternion, q}
 
   defp compute_residual(robot, positions, target_link, target_point) do
     {x, y, z} = Kinematics.link_position(robot, positions, target_link)

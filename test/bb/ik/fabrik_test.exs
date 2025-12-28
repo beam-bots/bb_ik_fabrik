@@ -17,6 +17,7 @@ defmodule BB.IK.FABRIKTest do
   alias BB.Robot.Kinematics
   alias BB.Robot.State
   alias BB.Robot.Transform
+  alias BB.Vec3
 
   describe "solve/5" do
     test "solves for a reachable target with 2-link arm" do
@@ -25,7 +26,7 @@ defmodule BB.IK.FABRIKTest do
 
       # Target within reach, off-axis to allow FABRIK to work
       # (FABRIK struggles with collinear targets)
-      target = {0.35, 0.2, 0.0}
+      target = Vec3.new(0.35, 0.2, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target)
@@ -45,7 +46,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Target to the side
-      target = {0.3, 0.3, 0.0}
+      target = Vec3.new(0.3, 0.3, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target)
@@ -66,7 +67,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Target way beyond reach (arm can only reach ~0.5m)
-      target = {1.0, 0.0, 0.0}
+      target = Vec3.new(1.0, 0.0, 0.0)
 
       assert {:error, %Unreachable{} = error} =
                FABRIK.solve(robot, positions, :tip, target)
@@ -83,7 +84,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       assert {:error, %UnknownLink{target_link: :nonexistent_link}} =
-               FABRIK.solve(robot, positions, :nonexistent_link, {0.3, 0.0, 0.0})
+               FABRIK.solve(robot, positions, :nonexistent_link, Vec3.new(0.3, 0.0, 0.0))
     end
 
     test "returns error for chain with no movable joints" do
@@ -91,14 +92,14 @@ defmodule BB.IK.FABRIKTest do
       positions = %{}
 
       assert {:error, %NoDofs{target_link: :end_link}} =
-               FABRIK.solve(robot, positions, :end_link, {0.0, 0.0, 0.1})
+               FABRIK.solve(robot, positions, :end_link, Vec3.new(0.0, 0.0, 0.1))
     end
 
     test "works with BB.Robot.State" do
       robot = TwoLinkArm.robot()
       {:ok, state} = State.new(robot)
 
-      target = {0.35, 0.2, 0.0}
+      target = Vec3.new(0.35, 0.2, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, state, :tip, target)
@@ -125,7 +126,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Use off-axis target
-      target = {0.3, 0.3, 0.0}
+      target = Vec3.new(0.3, 0.3, 0.0)
 
       # With enough iterations, should converge
       assert {:ok, _positions, meta} =
@@ -139,7 +140,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Use off-axis target
-      target = {0.3, 0.3, 0.0}
+      target = Vec3.new(0.3, 0.3, 0.0)
 
       # Loose tolerance should converge quickly
       assert {:ok, _positions, meta} =
@@ -153,7 +154,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{joint1: 0.0, joint2: 0.0, joint3: 0.0}
 
       # 3D target within reach
-      target = {0.1, 0.1, 0.25}
+      target = Vec3.new(0.1, 0.1, 0.25)
 
       assert {:ok, _solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target,
@@ -175,7 +176,7 @@ defmodule BB.IK.FABRIKTest do
       assert State.get_joint_position(state, :shoulder_joint) == 0.0
       assert State.get_joint_position(state, :elbow_joint) == 0.0
 
-      target = {0.3, 0.2, 0.0}
+      target = Vec3.new(0.3, 0.2, 0.0)
 
       assert {:ok, _positions, _meta} =
                FABRIK.solve_and_update(robot, state, :tip, target)
@@ -197,7 +198,7 @@ defmodule BB.IK.FABRIKTest do
       State.set_joint_position(state, :elbow_joint, 0.3)
 
       # Unreachable target
-      target = {10.0, 0.0, 0.0}
+      target = Vec3.new(10.0, 0.0, 0.0)
 
       assert {:error, %Unreachable{}} =
                FABRIK.solve_and_update(robot, state, :tip, target)
@@ -214,7 +215,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Target that might require exceeding limits
-      target = {-0.4, 0.2, 0.0}
+      target = Vec3.new(-0.4, 0.2, 0.0)
 
       {:ok, solved_positions, _meta} =
         FABRIK.solve(robot, positions, :tip, target, respect_limits: true)
@@ -230,7 +231,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # Target behind the robot that would require extreme angles
-      target = {-0.3, 0.3, 0.0}
+      target = Vec3.new(-0.3, 0.3, 0.0)
 
       {:ok, solved_clamped, _meta} =
         FABRIK.solve(robot, positions, :tip, target, respect_limits: true)
@@ -248,12 +249,11 @@ defmodule BB.IK.FABRIKTest do
   end
 
   describe "target formats" do
-    test "accepts Nx tensor {3} as target" do
+    test "accepts Vec3 as target" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      # Target as Nx tensor instead of tuple
-      target = Nx.tensor([0.35, 0.2, 0.0], type: :f64)
+      target = Vec3.new(0.35, 0.2, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target)
@@ -289,7 +289,7 @@ defmodule BB.IK.FABRIKTest do
       # Base is at origin, link1 at 0.2m, can extend 0.3m more, tip at +0.1m
       # Total reach: 0.2 + 0.3 + 0.1 = 0.6m along X when extended
       # Use a target off-axis to allow FABRIK to work
-      target = {0.25, 0.15, 0.0}
+      target = Vec3.new(0.25, 0.15, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target,
@@ -310,7 +310,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{rotate_joint: 0.0, slide_joint: 0.0}
 
       # Target within reach, off-axis
-      target = {0.25, 0.1, 0.0}
+      target = Vec3.new(0.25, 0.1, 0.0)
 
       {:ok, solved_positions, _meta} =
         FABRIK.solve(robot, positions, :tip, target,
@@ -332,7 +332,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{wheel_joint: 0.0}
 
       # Target to the side - arm is 0.3m long
-      target = {0.15, 0.2, 0.0}
+      target = Vec3.new(0.15, 0.2, 0.0)
 
       assert {:ok, solved_positions, meta} =
                FABRIK.solve(robot, positions, :tip, target,
@@ -352,7 +352,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{wheel_joint: 0.0}
 
       # Target behind - would require > 90 degree rotation
-      target = {-0.15, 0.2, 0.0}
+      target = Vec3.new(-0.15, 0.2, 0.0)
 
       {:ok, solved_positions, _meta} =
         FABRIK.solve(robot, positions, :tip, target,
@@ -370,7 +370,7 @@ defmodule BB.IK.FABRIKTest do
   describe "repeated solve stability" do
     test "repeated solves to same target remain stable" do
       robot = TwoLinkArm.robot()
-      target = {0.35, 0.2, 0.0}
+      target = Vec3.new(0.35, 0.2, 0.0)
       tolerance = 0.01
 
       # First solve from zero position
@@ -407,7 +407,7 @@ defmodule BB.IK.FABRIKTest do
     test "repeated solves with State remain stable" do
       robot = TwoLinkArm.robot()
       {:ok, state} = State.new(robot)
-      target = {0.35, 0.2, 0.0}
+      target = Vec3.new(0.35, 0.2, 0.0)
       tolerance = 0.01
 
       # First solve
