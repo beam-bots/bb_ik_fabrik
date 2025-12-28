@@ -7,6 +7,7 @@ defmodule BB.IK.FABRIK.Chain do
 
   alias BB.Error.Kinematics.NoDofs
   alias BB.Error.Kinematics.UnknownLink
+  alias BB.Quaternion
   alias BB.Robot
   alias BB.Robot.{Joint, Kinematics, Transform}
 
@@ -14,6 +15,7 @@ defmodule BB.IK.FABRIK.Chain do
     :joints,
     :joint_names,
     :points,
+    :orientations,
     :lengths,
     :limits,
     :root_transform,
@@ -24,6 +26,7 @@ defmodule BB.IK.FABRIK.Chain do
           joints: [Joint.t()],
           joint_names: [atom()],
           points: Nx.Tensor.t(),
+          orientations: Nx.Tensor.t(),
           lengths: Nx.Tensor.t(),
           limits: [Joint.limits() | nil],
           root_transform: Nx.Tensor.t(),
@@ -109,6 +112,28 @@ defmodule BB.IK.FABRIK.Chain do
     end)
   end
 
+  @doc """
+  Convert FABRIK solution frames back to joint positions.
+
+  Like `points_to_positions/4` but accepts the frames map format
+  from `Math.fabrik_with_orientation/7`.
+
+  ## Parameters
+
+  - `robot` - The BB.Robot struct
+  - `chain` - The original chain struct
+  - `frames` - Map with `:positions` and `:orientations` tensors
+  - `respect_limits?` - Whether to clamp values to joint limits
+
+  ## Returns
+
+  Map of joint names to positions (radians for revolute, metres for prismatic).
+  """
+  @spec frames_to_positions(Robot.t(), t(), map(), boolean()) :: %{atom() => float()}
+  def frames_to_positions(%Robot{} = robot, %__MODULE__{} = chain, frames, respect_limits?) do
+    points_to_positions(robot, chain, frames.positions, respect_limits?)
+  end
+
   defp compute_and_add_position(
          acc,
          _joint_name,
@@ -164,26 +189,41 @@ defmodule BB.IK.FABRIK.Chain do
 
     # Start with the first joint's parent link (the base/root)
     first_joint = List.first(joints)
-    root_point = Transform.get_translation(transforms[first_joint.parent_link])
+    root_transform = transforms[first_joint.parent_link]
+    root_point = Transform.get_translation(root_transform)
+    root_orientation = extract_orientation(root_transform)
 
-    # Get positions of each joint's child link
-    child_link_points =
+    # Get positions and orientations of each joint's child link
+    child_link_data =
       Enum.map(joints, fn joint ->
-        Transform.get_translation(transforms[joint.child_link])
+        transform = transforms[joint.child_link]
+        {Transform.get_translation(transform), extract_orientation(transform)}
       end)
 
+    child_link_points = Enum.map(child_link_data, &elem(&1, 0))
+    child_link_orientations = Enum.map(child_link_data, &elem(&1, 1))
+
     # The final point is the target link
-    end_effector_point = Transform.get_translation(transforms[target_link])
+    end_effector_transform = transforms[target_link]
+    end_effector_point = Transform.get_translation(end_effector_transform)
+    end_effector_orientation = extract_orientation(end_effector_transform)
 
-    # Combine all points, but deduplicate consecutive identical points
+    # Combine all points and orientations, deduplicating consecutive identical points
     all_points = [root_point] ++ child_link_points ++ [end_effector_point]
+    all_orientations = [root_orientation] ++ child_link_orientations ++ [end_effector_orientation]
 
-    # Remove consecutive duplicate points (within tolerance)
-    points_list = dedupe_consecutive_points(all_points)
+    # Remove consecutive duplicate points (within tolerance), keeping corresponding orientations
+    {points_list, orientations_list} =
+      dedupe_consecutive_points_with_orientations(all_points, all_orientations)
 
     points =
       points_list
       |> Enum.map(fn {x, y, z} -> [x, y, z] end)
+      |> Nx.tensor(type: :f64)
+
+    orientations =
+      orientations_list
+      |> Enum.map(&Nx.to_flat_list/1)
       |> Nx.tensor(type: :f64)
 
     n = length(points_list)
@@ -207,23 +247,40 @@ defmodule BB.IK.FABRIK.Chain do
       joints: joints,
       joint_names: joint_names,
       points: points,
+      orientations: orientations,
       lengths: lengths,
       limits: limits,
-      root_transform: Transform.identity(),
+      root_transform: root_transform,
       original_positions: positions
     }
   end
 
-  defp dedupe_consecutive_points(points) do
-    points
-    |> Enum.reduce([], fn point, acc -> maybe_add_point(acc, point) end)
-    |> Enum.reverse()
+  defp extract_orientation(transform) do
+    Quaternion.tensor(Transform.get_quaternion(transform))
   end
 
-  defp maybe_add_point([], point), do: [point]
+  @doc """
+  Convert chain to frames format for use with Math.fabrik_with_orientation.
+  """
+  @spec to_frames(t()) :: %{positions: Nx.Tensor.t(), orientations: Nx.Tensor.t()}
+  def to_frames(%__MODULE__{} = chain) do
+    %{positions: chain.points, orientations: chain.orientations}
+  end
 
-  defp maybe_add_point([last | _] = acc, point) do
-    if points_equal?(last, point), do: acc, else: [point | acc]
+  defp dedupe_consecutive_points_with_orientations(points, orientations) do
+    combined = Enum.zip(points, orientations)
+
+    {deduped, _} =
+      Enum.reduce(combined, {[], nil}, fn {point, ori}, {acc, last_point} ->
+        if last_point == nil or not points_equal?(last_point, point) do
+          {[{point, ori} | acc], point}
+        else
+          {acc, last_point}
+        end
+      end)
+
+    deduped = Enum.reverse(deduped)
+    {Enum.map(deduped, &elem(&1, 0)), Enum.map(deduped, &elem(&1, 1))}
   end
 
   defp points_equal?({x1, y1, z1}, {x2, y2, z2}) do

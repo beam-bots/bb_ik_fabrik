@@ -108,17 +108,48 @@ defmodule BB.IK.FABRIKTest do
       assert is_map(solved_positions)
     end
 
-    test "accepts 4x4 transform as target" do
+    test "accepts 4x4 transform as target with orientation" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      # Create a 4x4 transform target (off-axis)
+      # Create a 4x4 transform target - extracts both position and orientation
+      # A 2-link arm can't achieve arbitrary orientations, so we use loose tolerance
       target_transform = Transform.translation(0.3, 0.3, 0.0)
 
-      assert {:ok, _solved_positions, meta} =
-               FABRIK.solve(robot, positions, :tip, target_transform)
+      # Use loose orientation tolerance since 2-link arm has limited DOF
+      result = FABRIK.solve(robot, positions, :tip, target_transform, orientation_tolerance: 10.0)
 
-      assert meta.reached == true
+      # Should converge on position even if orientation can't be fully satisfied
+      case result do
+        {:ok, _positions, meta} ->
+          assert meta.residual < 0.1
+
+        {:error, %BB.Error.Kinematics.NoSolution{residual: residual}} ->
+          # Position should still be close even if orientation didn't converge
+          assert residual < 0.1
+      end
+    end
+
+    test "accepts axis constraint as orientation target" do
+      robot = TwoLinkArm.robot()
+      positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
+
+      # Target with axis constraint - "point the tool in this direction"
+      target_position = Vec3.new(0.3, 0.3, 0.0)
+      axis_direction = Vec3.new(1.0, 0.0, 0.0)
+      target = {target_position, {:axis, axis_direction}}
+
+      # A 2-link planar arm can't satisfy arbitrary axis constraints
+      # but should still converge on position
+      result = FABRIK.solve(robot, positions, :tip, target, orientation_tolerance: 10.0)
+
+      case result do
+        {:ok, _positions, meta} ->
+          assert meta.residual < 0.1
+
+        {:error, %BB.Error.Kinematics.NoSolution{residual: residual}} ->
+          assert residual < 0.1
+      end
     end
 
     test "respects max_iterations option" do
@@ -270,13 +301,19 @@ defmodule BB.IK.FABRIKTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      # 4x4 homogeneous transform
+      # 4x4 homogeneous transform - extracts position and orientation
       target = Transform.translation(0.35, 0.2, 0.0)
 
-      assert {:ok, _solved_positions, meta} =
-               FABRIK.solve(robot, positions, :tip, target)
+      # Use loose orientation tolerance for 2-link arm
+      result = FABRIK.solve(robot, positions, :tip, target, orientation_tolerance: 10.0)
 
-      assert meta.reached == true
+      case result do
+        {:ok, _positions, meta} ->
+          assert meta.residual < 0.01
+
+        {:error, %BB.Error.Kinematics.NoSolution{residual: residual}} ->
+          assert residual < 0.01
+      end
     end
   end
 

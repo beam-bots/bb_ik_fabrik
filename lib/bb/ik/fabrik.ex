@@ -73,9 +73,10 @@ defmodule BB.IK.FABRIK do
   def solve(%Robot{} = robot, positions, target_link, target, opts) when is_map(positions) do
     max_iterations = Keyword.get(opts, :max_iterations, @default_max_iterations)
     tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
+    orientation_tolerance = Keyword.get(opts, :orientation_tolerance, 0.01)
     respect_limits? = Keyword.get(opts, :respect_limits, true)
 
-    {target_point, _orientation_target} = normalize_target(target)
+    {target_point, orientation_target} = normalize_target(target)
 
     case Chain.build(robot, positions, target_link) do
       {:error, error} ->
@@ -83,29 +84,32 @@ defmodule BB.IK.FABRIK do
 
       {:ok, chain} ->
         result =
-          Math.fabrik(chain.points, chain.lengths, target_point, max_iterations, tolerance)
+          run_fabrik(
+            chain,
+            target_point,
+            orientation_target,
+            max_iterations,
+            tolerance,
+            orientation_tolerance
+          )
 
         case result do
-          {:ok, solved_points, fabrik_meta} ->
-            joint_positions =
-              Chain.points_to_positions(robot, chain, solved_points, respect_limits?)
-
+          {:ok, solved_data, fabrik_meta} ->
+            joint_positions = extract_joint_positions(robot, chain, solved_data, respect_limits?)
             merged_positions = Map.merge(positions, joint_positions)
             residual = compute_residual(robot, merged_positions, target_link, target_point)
 
             meta = %{
               iterations: fabrik_meta.iterations,
               residual: residual,
-              orientation_residual: nil,
+              orientation_residual: fabrik_meta[:orientation_residual],
               reached: true
             }
 
             {:ok, merged_positions, meta}
 
           {:error, :unreachable, fabrik_meta} ->
-            joint_positions =
-              Chain.points_to_positions(robot, chain, fabrik_meta.points, respect_limits?)
-
+            joint_positions = extract_joint_positions(robot, chain, fabrik_meta, respect_limits?)
             merged_positions = Map.merge(positions, joint_positions)
             residual = compute_residual(robot, merged_positions, target_link, target_point)
 
@@ -120,9 +124,7 @@ defmodule BB.IK.FABRIK do
              }}
 
           {:error, :max_iterations, fabrik_meta} ->
-            joint_positions =
-              Chain.points_to_positions(robot, chain, fabrik_meta.points, respect_limits?)
-
+            joint_positions = extract_joint_positions(robot, chain, fabrik_meta, respect_limits?)
             merged_positions = Map.merge(positions, joint_positions)
             residual = compute_residual(robot, merged_positions, target_link, target_point)
 
@@ -136,6 +138,93 @@ defmodule BB.IK.FABRIK do
              }}
         end
     end
+  end
+
+  defp run_fabrik(chain, target_point, :none, max_iterations, tolerance, _orientation_tolerance) do
+    result = Math.fabrik(chain.points, chain.lengths, target_point, max_iterations, tolerance)
+
+    case result do
+      {:ok, points, meta} -> {:ok, points, meta}
+      {:error, reason, meta} -> {:error, reason, meta}
+    end
+  end
+
+  defp run_fabrik(
+         chain,
+         target_point,
+         orientation_target,
+         max_iterations,
+         tolerance,
+         orientation_tolerance
+       ) do
+    frames = Chain.to_frames(chain)
+    target_quaternion = orientation_to_quaternion(orientation_target, frames)
+
+    result =
+      Math.fabrik_with_orientation(
+        frames,
+        chain.lengths,
+        target_point,
+        target_quaternion,
+        max_iterations,
+        tolerance,
+        orientation_tolerance: orientation_tolerance
+      )
+
+    case result do
+      {:ok, frames, meta} -> {:ok, frames, meta}
+      {:error, reason, meta} -> {:error, reason, Map.put(meta, :frames, meta.frames)}
+    end
+  end
+
+  defp orientation_to_quaternion({:quaternion, q}, _frames), do: q
+
+  defp orientation_to_quaternion({:axis, axis_vec}, frames) do
+    # Get current end-effector orientation (last in chain)
+    n = Nx.axis_size(frames.orientations, 0)
+
+    current_quat_tensor =
+      Nx.slice(frames.orientations, [n - 1, 0], [1, 4]) |> Nx.squeeze(axes: [0])
+
+    current_quat = Quaternion.from_tensor(current_quat_tensor)
+
+    # Current tool direction (Z-axis in end-effector's local frame)
+    current_z = Quaternion.rotate_vector(current_quat, Vec3.unit_z())
+
+    # Normalise target axis
+    target_axis = Vec3.normalise(axis_vec)
+
+    # Compute minimum rotation to align current Z with target axis
+    rotation = Quaternion.from_two_vectors(current_z, target_axis)
+
+    # Apply rotation to current orientation to get target orientation
+    Quaternion.multiply(rotation, current_quat)
+  end
+
+  # Success with orientation - frames map directly
+  defp extract_joint_positions(
+         robot,
+         chain,
+         %{positions: _, orientations: _} = frames,
+         respect_limits?
+       ) do
+    Chain.frames_to_positions(robot, chain, frames, respect_limits?)
+  end
+
+  # Error with orientation - meta map contains :frames key
+  defp extract_joint_positions(robot, chain, %{frames: frames}, respect_limits?) do
+    extract_joint_positions(robot, chain, frames, respect_limits?)
+  end
+
+  # Error with position-only - meta map contains :points key
+  defp extract_joint_positions(robot, chain, %{points: points}, respect_limits?) do
+    Chain.points_to_positions(robot, chain, points, respect_limits?)
+  end
+
+  # Success with position-only - Nx.Tensor directly
+  defp extract_joint_positions(robot, chain, points, respect_limits?)
+       when is_struct(points, Nx.Tensor) do
+    Chain.points_to_positions(robot, chain, points, respect_limits?)
   end
 
   @doc """
