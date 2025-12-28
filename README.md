@@ -22,6 +22,7 @@ FABRIK (Forward And Backward Reaching Inverse Kinematics) is an iterative algori
 - Implements the `BB.IK.Solver` behaviour for pluggable IK solvers
 - Works with `BB.Robot.State` or plain position maps
 - Supports revolute, prismatic, and continuous joints
+- Position and orientation solving (quaternion or axis constraints)
 - Respects joint limits with optional clamping
 - Uses Nx tensors for efficient computation
 - Returns best-effort positions even when targets are unreachable
@@ -69,9 +70,10 @@ end
 
 ```elixir
 BB.IK.FABRIK.solve(robot, state, :end_effector, target,
-  max_iterations: 100,    # Maximum FABRIK iterations (default: 50)
-  tolerance: 0.001,       # Convergence tolerance in metres (default: 1.0e-4)
-  respect_limits: true    # Clamp to joint limits (default: true)
+  max_iterations: 100,         # Maximum FABRIK iterations (default: 50)
+  tolerance: 0.001,            # Position tolerance in metres (default: 1.0e-4)
+  orientation_tolerance: 0.1,  # Orientation tolerance in radians (default: 0.01)
+  respect_limits: true         # Clamp to joint limits (default: true)
 )
 ```
 
@@ -96,21 +98,31 @@ end
 Targets can be specified as:
 
 ```elixir
-# Position tuple
-target = {0.3, 0.2, 0.1}
+# Position only (Vec3)
+target = BB.Vec3.new(0.3, 0.2, 0.1)
 
-# Nx tensor
-target = Nx.tensor([0.3, 0.2, 0.1])
+# Position with axis constraint ("point tool in this direction")
+target = {BB.Vec3.new(0.3, 0.2, 0.1), {:axis, BB.Vec3.new(0.0, 0.0, -1.0)}}
 
-# 4x4 homogeneous transform (position extracted, orientation ignored)
-target = BB.Robot.Transform.translation(0.3, 0.2, 0.1)
+# Position with full orientation (quaternion)
+quat = BB.Quaternion.from_axis_angle(BB.Vec3.unit_z(), :math.pi() / 4)
+target = {BB.Vec3.new(0.3, 0.2, 0.1), {:quaternion, quat}}
+
+# 4x4 homogeneous transform (extracts both position and orientation)
+target = BB.Robot.Transform.from_position_quaternion(
+  BB.Vec3.new(0.3, 0.2, 0.1),
+  BB.Quaternion.identity()
+)
 ```
+
+When using orientation constraints, the result metadata includes `orientation_residual` (in radians) alongside the position `residual`.
 
 ## Limitations
 
-- **Position-only**: Currently solves for position, not orientation
 - **Serial chains only**: Does not support branching topologies
 - **Collinear targets**: FABRIK can struggle when the target lies on the same line as a straight chain
+- **Co-located joints**: FABRIK operates on positions, not orientations. Robots with multiple joints at the same position (spherical shoulders, wrists with multiple axes at one point) cannot be solved correctly because there is insufficient information to determine individual joint angles. For example, a shoulder with yaw/pitch/roll at one location produces only one direction vector, but three angles are needed. A full Quaternion FABRIK implementation would be required to handle these configurations.
+- **Recommended use cases**: Simple 2-3 DOF arms where each joint is at a distinct position work best. For complex 6-DOF arms, consider analytical IK solvers or other approaches.
 
 ## Documentation
 

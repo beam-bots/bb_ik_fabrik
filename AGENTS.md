@@ -94,7 +94,7 @@ All results include a `meta` map with:
 
 ### Known Limitations
 
-1. **Position-only** - Currently solves for position, not orientation
+1. **Co-located joints** - FABRIK operates on positions, not orientations. Robots with multiple joints at the same position (spherical shoulders, wrists) cannot be solved correctly. Each unique position only provides one direction vector, but multiple angles would be needed. Simple 2-3 DOF arms with distinct joint positions work well; complex 6-DOF arms with spherical joints need a full Quaternion FABRIK implementation or analytical IK.
 2. **Collinear targets** - FABRIK struggles when target is on the same line as a straight chain
 3. **Serial chains only** - Does not support branching topologies
 

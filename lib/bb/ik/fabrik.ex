@@ -140,15 +140,9 @@ defmodule BB.IK.FABRIK do
     end
   end
 
-  defp run_fabrik(chain, target_point, :none, max_iterations, tolerance, _orientation_tolerance) do
-    result = Math.fabrik(chain.points, chain.lengths, target_point, max_iterations, tolerance)
-
-    case result do
-      {:ok, points, meta} -> {:ok, points, meta}
-      {:error, reason, meta} -> {:error, reason, meta}
-    end
-  end
-
+  # Always use orientation-aware FABRIK internally, even for position-only targets.
+  # This tracks orientations at each joint, enabling proper angle extraction for
+  # co-located joints (like spherical shoulders/wrists) via frames_to_positions.
   defp run_fabrik(
          chain,
          target_point,
@@ -158,7 +152,12 @@ defmodule BB.IK.FABRIK do
          orientation_tolerance
        ) do
     frames = Chain.to_frames(chain)
-    target_quaternion = orientation_to_quaternion(orientation_target, frames)
+
+    target_quaternion =
+      case orientation_target do
+        :none -> nil
+        _ -> orientation_to_quaternion(orientation_target, frames)
+      end
 
     result =
       Math.fabrik_with_orientation(
@@ -201,7 +200,7 @@ defmodule BB.IK.FABRIK do
     Quaternion.multiply(rotation, current_quat)
   end
 
-  # Success with orientation - frames map directly
+  # Success - frames map with positions and orientations
   defp extract_joint_positions(
          robot,
          chain,
@@ -211,20 +210,9 @@ defmodule BB.IK.FABRIK do
     Chain.frames_to_positions(robot, chain, frames, respect_limits?)
   end
 
-  # Error with orientation - meta map contains :frames key
+  # Error case - meta map contains :frames key
   defp extract_joint_positions(robot, chain, %{frames: frames}, respect_limits?) do
     extract_joint_positions(robot, chain, frames, respect_limits?)
-  end
-
-  # Error with position-only - meta map contains :points key
-  defp extract_joint_positions(robot, chain, %{points: points}, respect_limits?) do
-    Chain.points_to_positions(robot, chain, points, respect_limits?)
-  end
-
-  # Success with position-only - Nx.Tensor directly
-  defp extract_joint_positions(robot, chain, points, respect_limits?)
-       when is_struct(points, Nx.Tensor) do
-    Chain.points_to_positions(robot, chain, points, respect_limits?)
   end
 
   @doc """
