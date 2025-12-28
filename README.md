@@ -117,12 +117,40 @@ target = BB.Robot.Transform.from_position_quaternion(
 
 When using orientation constraints, the result metadata includes `orientation_residual` (in radians) alongside the position `residual`.
 
+## Supported Arm Configurations
+
+FABRIK works best with **simple planar or spatial arms** where:
+- Each joint is at a **distinct position** (no co-located joints)
+- Joints have **significant lever arms** between them
+- The arm has **2-4 degrees of freedom**
+
+### Works Well
+
+- **2-link planar arms**: Classic shoulder + elbow configuration
+- **3-link arms**: Shoulder + elbow + wrist with distinct positions
+- **SCARA-style arms**: Horizontal joints with vertical offsets
+- **Simple grippers**: Where the end-effector is offset from the last joint
+
+### Limited Support
+
+- **6-DOF anthropomorphic arms** (e.g., WidowX, Kinova): FABRIK converges in point-space but may not find kinematically valid configurations. The algorithm distributes movement toward the end-effector rather than through shoulder/elbow rotation.
+- **Arms with co-located joints** (spherical wrists/shoulders): Multiple joints at the same position cannot be resolved from direction changes alone.
+
 ## Limitations
 
 - **Serial chains only**: Does not support branching topologies
+- **No joint axis constraints**: FABRIK moves points to satisfy distance constraints without respecting joint rotation axes. This means the algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses.
 - **Collinear targets**: FABRIK can struggle when the target lies on the same line as a straight chain
-- **Co-located joints**: FABRIK operates on positions, not orientations. Robots with multiple joints at the same position (spherical shoulders, wrists with multiple axes at one point) cannot be solved correctly because there is insufficient information to determine individual joint angles. For example, a shoulder with yaw/pitch/roll at one location produces only one direction vector, but three angles are needed. A full Quaternion FABRIK implementation would be required to handle these configurations.
-- **Recommended use cases**: Simple 2-3 DOF arms where each joint is at a distinct position work best. For complex 6-DOF arms, consider analytical IK solvers or other approaches.
+- **Co-located joints**: Robots with multiple joints at the same position (spherical shoulders, wrists with multiple axes at one point) cannot be solved correctly because there is insufficient information to determine individual joint angles.
+- **Mostly-vertical configurations**: Arms that start nearly vertical (like many 6-DOF arms at home position) may have poor convergence because FABRIK tends to bend the end-effector joints rather than the shoulder/elbow.
+
+### When to Use a Different Solver
+
+Consider analytical IK or Jacobian-based methods when:
+- You have a 6-DOF arm with specific geometry (closed-form solutions exist)
+- You need precise control over which joints move
+- Your arm has spherical wrist/shoulder configurations
+- You need to optimise for specific joint configurations (elbow up vs down)
 
 ## Documentation
 

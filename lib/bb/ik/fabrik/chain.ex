@@ -182,7 +182,7 @@ defmodule BB.IK.FABRIK.Chain do
     # Check if this joint shares its point with other joints (co-located)
     is_colocated = colocated_joint?(chain.joint_point_indices, idx)
 
-    # Get segment length
+    # Get segment length (from point_idx to point_idx+1)
     segment_length =
       if point_idx < Nx.axis_size(chain.lengths, 0) do
         chain.lengths[point_idx] |> Nx.to_number()
@@ -196,18 +196,18 @@ defmodule BB.IK.FABRIK.Chain do
         joint.type == :fixed ->
           0.0
 
+        # Out of bounds - no delta
+        point_idx >= num_points - 1 ->
+          0.0
+
         # Co-located joint or zero-length segment - use orientation-based extraction
         # This handles spherical shoulders/wrists where multiple joints share a point
-        (is_colocated or segment_length < 1.0e-6) and point_idx < num_points - 1 ->
+        is_colocated or segment_length < 1.0e-6 ->
           compute_angle_from_orientations(chain, frames, point_idx, joint)
 
         # Non-zero segment with unique point - use position-based extraction
-        point_idx < num_points - 1 ->
-          compute_joint_position(chain, frames.positions, point_idx, joint)
-
-        # Out of bounds
         true ->
-          0.0
+          compute_joint_position(chain, frames.positions, point_idx, joint)
       end
 
     delta = if abs(delta) < @delta_threshold, do: 0.0, else: delta
@@ -230,18 +230,20 @@ defmodule BB.IK.FABRIK.Chain do
   end
 
   defp compute_angle_from_orientations(chain, frames, point_idx, joint) do
-    # For co-located joints, extract joint angle from the direction change
-    # from this point to the next non-colocated point.
+    # For co-located joints, extract joint angle from the direction change.
     #
     # Note: We use direction-based extraction instead of orientation at the point
     # because FABRIK pins the root orientation in the forward pass. The direction
     # change captures the actual rotation that occurred.
 
-    num_points = Nx.axis_size(frames.positions, 0)
+    # Direction from current point to next point
+    p_joint = get_point(frames.positions, point_idx)
+    p_next = get_point(frames.positions, point_idx + 1)
+    direction = Nx.subtract(p_next, p_joint)
 
-    # Find direction to first non-collocated point after this one
-    direction = find_direction_to_child_point(frames.positions, point_idx, num_points)
-    orig_direction = find_direction_to_child_point(chain.points, point_idx, num_points)
+    orig_p_joint = get_point(chain.points, point_idx)
+    orig_p_next = get_point(chain.points, point_idx + 1)
+    orig_direction = Nx.subtract(orig_p_next, orig_p_joint)
 
     # Compute angle between original and solved directions, projected onto joint axis
     joint_axis = joint.axis || {0.0, 0.0, 1.0}
@@ -275,27 +277,6 @@ defmodule BB.IK.FABRIK.Chain do
     end
   end
 
-  defp find_direction_to_child_point(points, point_idx, num_points) do
-    # Find the first point that's significantly different from current point
-    current = Nx.slice(points, [point_idx, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-
-    direction =
-      Enum.reduce_while((point_idx + 1)..(num_points - 1)//1, nil, fn i, _acc ->
-        candidate = Nx.slice(points, [i, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-        diff = Nx.subtract(candidate, current)
-        dist = Nx.LinAlg.norm(diff) |> Nx.to_number()
-
-        if dist > 1.0e-6 do
-          {:halt, Nx.divide(diff, dist)}
-        else
-          {:cont, nil}
-        end
-      end)
-
-    # Default to Z-axis if no meaningful direction found
-    direction || Nx.tensor([0.0, 0.0, 1.0], type: :f64)
-  end
-
   defp compute_and_add_position(
          acc,
          _joint_name,
@@ -322,12 +303,11 @@ defmodule BB.IK.FABRIK.Chain do
     point_idx = Enum.at(chain.joint_point_indices, idx, 0)
     num_points = Nx.axis_size(solved_points, 0)
 
-    # Ensure we have valid indices for both joint point and child point
+    # Ensure we have valid indices: need point_idx and point_idx+1
     delta =
       if point_idx < num_points - 1 do
         compute_joint_position(chain, solved_points, point_idx, joint)
       else
-        # Joint's child point would be out of bounds - no delta
         0.0
       end
 
@@ -474,21 +454,21 @@ defmodule BB.IK.FABRIK.Chain do
 
   defp compute_joint_position(chain, solved_points, idx, joint) do
     # Points are: [root, child_of_joint0, child_of_joint1, ..., end_effector]
-    # For joint at index idx:
-    # - The joint pivot is at point idx (where we rotate from)
-    # - The direction to child is toward point idx + 1
+    # For joint at point index idx:
+    # - The joint controls the direction from its point (idx) to the next point (idx+1)
+    # - This represents the segment from the joint's child link to the next link
     p_joint = get_point(solved_points, idx)
-    p_child = get_point(solved_points, idx + 1)
+    p_next = get_point(solved_points, idx + 1)
 
     orig_p_joint = get_point(chain.points, idx)
-    orig_p_child = get_point(chain.points, idx + 1)
+    orig_p_next = get_point(chain.points, idx + 1)
 
     case joint.type do
       type when type in [:revolute, :continuous] ->
-        compute_revolute_angle(orig_p_joint, orig_p_child, p_joint, p_child, joint.axis)
+        compute_revolute_angle(orig_p_joint, orig_p_next, p_joint, p_next, joint.axis)
 
       :prismatic ->
-        compute_prismatic_distance(orig_p_joint, orig_p_child, p_joint, p_child, joint.axis)
+        compute_prismatic_distance(orig_p_joint, orig_p_next, p_joint, p_next, joint.axis)
 
       _ ->
         0.0

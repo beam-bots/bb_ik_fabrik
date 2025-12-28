@@ -92,11 +92,28 @@ All results include a `meta` map with:
 - `reached` - Boolean, true if converged
 - `reason` - `:converged`, `:unreachable`, `:max_iterations`, `:unknown_link`, or `:no_dofs`
 
+### Supported Arm Configurations
+
+**Works well:**
+- 2-link planar arms (shoulder + elbow)
+- 3-link arms with distinct joint positions
+- SCARA-style arms
+- Simple grippers with offset end-effectors
+
+**Limited support:**
+- 6-DOF anthropomorphic arms (e.g., WidowX, Kinova) - converges in point-space but may not find kinematically valid configurations
+- Arms with co-located joints (spherical wrists/shoulders)
+- Arms starting in mostly-vertical configurations
+
 ### Known Limitations
 
-1. **Co-located joints** - FABRIK operates on positions, not orientations. Robots with multiple joints at the same position (spherical shoulders, wrists) cannot be solved correctly. Each unique position only provides one direction vector, but multiple angles would be needed. Simple 2-3 DOF arms with distinct joint positions work well; complex 6-DOF arms with spherical joints need a full Quaternion FABRIK implementation or analytical IK.
-2. **Collinear targets** - FABRIK struggles when target is on the same line as a straight chain
-3. **Serial chains only** - Does not support branching topologies
+1. **No joint axis constraints** - FABRIK moves points to satisfy distance constraints without respecting joint rotation axes. The algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses. This is why complex 6-DOF arms often fail despite FABRIK reporting low residuals.
+2. **Co-located joints** - Robots with multiple joints at the same position (spherical shoulders, wrists) cannot be solved correctly. Each unique position only provides one direction vector, but multiple angles would be needed.
+3. **Mostly-vertical configurations** - Arms that start nearly vertical have poor convergence because FABRIK tends to bend end-effector joints rather than shoulder/elbow.
+4. **Collinear targets** - FABRIK struggles when target is on the same line as a straight chain
+5. **Serial chains only** - Does not support branching topologies
+
+For 6-DOF arms or arms with spherical joints, consider analytical IK or Jacobian-based methods.
 
 ### Dependencies
 
