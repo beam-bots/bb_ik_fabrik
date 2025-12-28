@@ -6,7 +6,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
   use ExUnit.Case, async: true
 
   alias BB.IK.FABRIK.Tracker
-  alias BB.Vec3
+  alias BB.Math.Vec3
 
   defmodule TrackerTestRobot do
     @moduledoc false

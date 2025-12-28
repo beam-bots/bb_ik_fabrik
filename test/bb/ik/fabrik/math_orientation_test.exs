@@ -6,8 +6,8 @@ defmodule BB.IK.FABRIK.MathOrientationTest do
   use ExUnit.Case, async: true
 
   alias BB.IK.FABRIK.Math
-  alias BB.Quaternion
-  alias BB.Vec3
+  alias BB.Math.Quaternion
+  alias BB.Math.Vec3
 
   describe "points_to_frames/1" do
     test "creates frames with identity orientations" do

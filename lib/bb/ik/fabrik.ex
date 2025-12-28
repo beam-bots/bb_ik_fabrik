@@ -52,10 +52,10 @@ defmodule BB.IK.FABRIK do
   alias BB.Error.Kinematics.NoSolution
   alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK.{Chain, Math}
-  alias BB.Quaternion
+  alias BB.Math.Quaternion
+  alias BB.Math.Vec3
   alias BB.Robot
   alias BB.Robot.{Kinematics, State, Transform}
-  alias BB.Vec3
 
   @default_max_iterations 50
   @default_tolerance 1.0e-4

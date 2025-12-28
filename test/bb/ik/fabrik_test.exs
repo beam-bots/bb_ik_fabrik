@@ -15,11 +15,11 @@ defmodule BB.IK.FABRIKTest do
   alias BB.IK.TestRobots.SixDofArm
   alias BB.IK.TestRobots.ThreeLinkArm
   alias BB.IK.TestRobots.TwoLinkArm
-  alias BB.Quaternion
+  alias BB.Math.Quaternion
+  alias BB.Math.Vec3
   alias BB.Robot.Kinematics
   alias BB.Robot.State
   alias BB.Robot.Transform
-  alias BB.Vec3
 
   describe "solve/5" do
     test "solves for a reachable target with 2-link arm" do

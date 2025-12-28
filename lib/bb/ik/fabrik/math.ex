@@ -10,7 +10,7 @@ defmodule BB.IK.FABRIK.Math do
   solving with orientation (`fabrik_with_orientation/7`).
   """
 
-  alias BB.Quaternion
+  alias BB.Math.Quaternion
 
   @doc """
   Run the FABRIK algorithm on a chain of points.

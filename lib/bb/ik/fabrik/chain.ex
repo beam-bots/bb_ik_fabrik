@@ -7,7 +7,7 @@ defmodule BB.IK.FABRIK.Chain do
 
   alias BB.Error.Kinematics.NoDofs
   alias BB.Error.Kinematics.UnknownLink
-  alias BB.Quaternion
+  alias BB.Math.Quaternion
   alias BB.Robot
   alias BB.Robot.{Joint, Kinematics, Transform}
 
