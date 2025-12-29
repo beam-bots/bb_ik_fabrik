@@ -117,7 +117,7 @@ For 6-DOF arms or arms with spherical joints, consider analytical IK or Jacobian
 
 ### Dependencies
 
-- `bb` - Beam Bots core framework (uses `BB.Robot`, `BB.Robot.Kinematics`, `BB.Robot.Transform`)
+- `bb` - Beam Bots core framework (uses `BB.Robot`, `BB.Robot.Kinematics`, `BB.Math.Transform`)
 - `nx` - Numerical computing for tensor operations
 
 ### Testing

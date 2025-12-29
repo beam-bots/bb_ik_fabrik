@@ -16,10 +16,10 @@ defmodule BB.IK.FABRIKTest do
   alias BB.IK.TestRobots.ThreeLinkArm
   alias BB.IK.TestRobots.TwoLinkArm
   alias BB.Math.Quaternion
+  alias BB.Math.Transform
   alias BB.Math.Vec3
   alias BB.Robot.Kinematics
   alias BB.Robot.State
-  alias BB.Robot.Transform
 
   describe "solve/5" do
     test "solves for a reachable target with 2-link arm" do
@@ -116,7 +116,7 @@ defmodule BB.IK.FABRIKTest do
 
       # Create a 4x4 transform target - extracts both position and orientation
       # A 2-link arm can't achieve arbitrary orientations, so we use loose tolerance
-      target_transform = Transform.translation(0.3, 0.3, 0.0)
+      target_transform = Transform.translation(Vec3.new(0.3, 0.3, 0.0))
 
       # Use loose orientation tolerance since 2-link arm has limited DOF
       result = FABRIK.solve(robot, positions, :tip, target_transform, orientation_tolerance: 10.0)
@@ -304,7 +304,7 @@ defmodule BB.IK.FABRIKTest do
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
       # 4x4 homogeneous transform - extracts position and orientation
-      target = Transform.translation(0.35, 0.2, 0.0)
+      target = Transform.translation(Vec3.new(0.35, 0.2, 0.0))
 
       # Use loose orientation tolerance for 2-link arm
       result = FABRIK.solve(robot, positions, :tip, target, orientation_tolerance: 10.0)

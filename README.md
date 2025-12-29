@@ -99,19 +99,19 @@ Targets can be specified as:
 
 ```elixir
 # Position only (Vec3)
-target = BB.Vec3.new(0.3, 0.2, 0.1)
+target = BB.Math.Vec3.new(0.3, 0.2, 0.1)
 
 # Position with axis constraint ("point tool in this direction")
-target = {BB.Vec3.new(0.3, 0.2, 0.1), {:axis, BB.Vec3.new(0.0, 0.0, -1.0)}}
+target = {BB.Math.Vec3.new(0.3, 0.2, 0.1), {:axis, BB.Math.Vec3.new(0.0, 0.0, -1.0)}}
 
 # Position with full orientation (quaternion)
-quat = BB.Quaternion.from_axis_angle(BB.Vec3.unit_z(), :math.pi() / 4)
-target = {BB.Vec3.new(0.3, 0.2, 0.1), {:quaternion, quat}}
+quat = BB.Math.Quaternion.from_axis_angle(BB.Math.Vec3.unit_z(), :math.pi() / 4)
+target = {BB.Math.Vec3.new(0.3, 0.2, 0.1), {:quaternion, quat}}
 
 # 4x4 homogeneous transform (extracts both position and orientation)
-target = BB.Robot.Transform.from_position_quaternion(
-  BB.Vec3.new(0.3, 0.2, 0.1),
-  BB.Quaternion.identity()
+target = BB.Math.Transform.from_position_quaternion(
+  BB.Math.Vec3.new(0.3, 0.2, 0.1),
+  BB.Math.Quaternion.identity()
 )
 ```
 

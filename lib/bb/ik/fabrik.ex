@@ -53,9 +53,10 @@ defmodule BB.IK.FABRIK do
   alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK.{Chain, Math}
   alias BB.Math.Quaternion
+  alias BB.Math.Transform
   alias BB.Math.Vec3
   alias BB.Robot
-  alias BB.Robot.{Kinematics, State, Transform}
+  alias BB.Robot.{Kinematics, State}
 
   @default_max_iterations 50
   @default_tolerance 1.0e-4
@@ -247,11 +248,18 @@ defmodule BB.IK.FABRIK do
     {Vec3.tensor(vec), normalize_orientation(orientation)}
   end
 
+  defp normalize_target(%Transform{} = transform) do
+    pos_vec = Transform.get_translation(transform)
+    orientation = {:quaternion, Transform.get_quaternion(transform)}
+    {Vec3.tensor(pos_vec), orientation}
+  end
+
   defp normalize_target(%Nx.Tensor{} = tensor) do
     case Nx.shape(tensor) do
       {4, 4} ->
-        pos_vec = Transform.get_translation_vec3(tensor)
-        orientation = {:quaternion, Transform.get_quaternion(tensor)}
+        transform = Transform.from_tensor(tensor)
+        pos_vec = Transform.get_translation(transform)
+        orientation = {:quaternion, Transform.get_quaternion(transform)}
         {Vec3.tensor(pos_vec), orientation}
 
       shape ->

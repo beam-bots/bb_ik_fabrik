@@ -8,8 +8,10 @@ defmodule BB.IK.FABRIK.Chain do
   alias BB.Error.Kinematics.NoDofs
   alias BB.Error.Kinematics.UnknownLink
   alias BB.Math.Quaternion
+  alias BB.Math.Transform
+  alias BB.Math.Vec3
   alias BB.Robot
-  alias BB.Robot.{Joint, Kinematics, Transform}
+  alias BB.Robot.{Joint, Kinematics}
 
   defstruct [
     :joints,
@@ -376,7 +378,7 @@ defmodule BB.IK.FABRIK.Chain do
 
     points =
       points_list
-      |> Enum.map(fn {x, y, z} -> [x, y, z] end)
+      |> Enum.map(fn %Vec3{} = v -> Vec3.to_list(v) end)
       |> Nx.tensor(type: :f64)
 
     orientations =
@@ -447,9 +449,12 @@ defmodule BB.IK.FABRIK.Chain do
     {Enum.map(deduped, &elem(&1, 0)), Enum.map(deduped, &elem(&1, 1)), mapping}
   end
 
-  defp points_equal?({x1, y1, z1}, {x2, y2, z2}) do
+  defp points_equal?(%Vec3{} = p1, %Vec3{} = p2) do
     tolerance = 1.0e-6
-    abs(x1 - x2) < tolerance and abs(y1 - y2) < tolerance and abs(z1 - z2) < tolerance
+
+    abs(Vec3.x(p1) - Vec3.x(p2)) < tolerance and
+      abs(Vec3.y(p1) - Vec3.y(p2)) < tolerance and
+      abs(Vec3.z(p1) - Vec3.z(p2)) < tolerance
   end
 
   defp compute_joint_position(chain, solved_points, idx, joint) do
