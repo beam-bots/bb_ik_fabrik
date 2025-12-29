@@ -299,11 +299,11 @@ defmodule BB.IK.FABRIKTest do
       assert_in_delta y, 0.2, 0.02
     end
 
-    test "accepts Nx tensor {4, 4} transform as target" do
+    test "accepts Transform struct as target" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      # 4x4 homogeneous transform - extracts position and orientation
+      # Transform struct - extracts position and orientation
       target = Transform.translation(Vec3.new(0.35, 0.2, 0.0))
 
       # Use loose orientation tolerance for 2-link arm

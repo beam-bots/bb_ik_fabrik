@@ -254,20 +254,6 @@ defmodule BB.IK.FABRIK do
     {Vec3.tensor(pos_vec), orientation}
   end
 
-  defp normalize_target(%Nx.Tensor{} = tensor) do
-    case Nx.shape(tensor) do
-      {4, 4} ->
-        transform = Transform.from_tensor(tensor)
-        pos_vec = Transform.get_translation(transform)
-        orientation = {:quaternion, Transform.get_quaternion(transform)}
-        {Vec3.tensor(pos_vec), orientation}
-
-      shape ->
-        raise ArgumentError,
-              "Invalid target tensor shape #{inspect(shape)}. Expected {4, 4}."
-    end
-  end
-
   defp normalize_orientation(:none), do: :none
   defp normalize_orientation({:axis, %Vec3{} = vec}), do: {:axis, vec}
   defp normalize_orientation({:quaternion, %Quaternion{} = q}), do: {:quaternion, q}
