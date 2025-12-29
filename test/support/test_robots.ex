@@ -318,4 +318,170 @@ defmodule BB.IK.TestRobots do
       end
     end
   end
+
+  defmodule SixDofArm do
+    @moduledoc """
+    6-DOF anthropomorphic arm for testing orientation-constrained IK.
+
+    Structure:
+    - base_link
+      - shoulder_yaw (revolute, Z-axis)
+        - shoulder_link1
+          - shoulder_pitch (revolute, Y-axis)
+            - shoulder_link2
+              - shoulder_roll (revolute, X-axis)
+                - upper_arm (0.25m)
+                  - elbow_pitch (revolute, Y-axis)
+                    - forearm (0.2m)
+                      - wrist_pitch (revolute, Y-axis)
+                        - wrist_link
+                          - wrist_roll (revolute, X-axis)
+                            - hand
+                              - tip_joint (fixed, 0.1m)
+                                - tip
+
+    Total: 6 revolute joints providing full 6-DOF control
+    - Shoulder: yaw (Z), pitch (Y), roll (X) - spherical wrist
+    - Elbow: pitch (Y) - single axis bend
+    - Wrist: pitch (Y), roll (X) - allows tool orientation
+
+    This arm can achieve arbitrary position and orientation within its workspace.
+    Total reach: ~0.55m from shoulder
+    """
+    use BB
+    import BB.Unit
+
+    settings do
+      name(:six_dof_arm)
+    end
+
+    topology do
+      link :base_link do
+        # Shoulder yaw - rotation around vertical axis
+        joint :shoulder_yaw do
+          type(:revolute)
+
+          axis do
+          end
+
+          limit do
+            lower(~u(-180 degree))
+            upper(~u(180 degree))
+            effort(~u(20 newton_meter))
+            velocity(~u(90 degree_per_second))
+          end
+
+          link :shoulder_link1 do
+            # Shoulder pitch - forward/back rotation
+            joint :shoulder_pitch do
+              type(:revolute)
+
+              axis do
+                roll(~u(-90 degree))
+              end
+
+              limit do
+                lower(~u(-90 degree))
+                upper(~u(90 degree))
+                effort(~u(20 newton_meter))
+                velocity(~u(90 degree_per_second))
+              end
+
+              link :shoulder_link2 do
+                # Shoulder roll - rotation around arm axis
+                joint :shoulder_roll do
+                  type(:revolute)
+
+                  axis do
+                    pitch(~u(90 degree))
+                  end
+
+                  limit do
+                    lower(~u(-180 degree))
+                    upper(~u(180 degree))
+                    effort(~u(10 newton_meter))
+                    velocity(~u(120 degree_per_second))
+                  end
+
+                  link :upper_arm do
+                    # Elbow pitch
+                    joint :elbow_pitch do
+                      type(:revolute)
+
+                      origin do
+                        z(~u(0.25 meter))
+                      end
+
+                      axis do
+                        roll(~u(-90 degree))
+                      end
+
+                      limit do
+                        lower(~u(-135 degree))
+                        upper(~u(135 degree))
+                        effort(~u(10 newton_meter))
+                        velocity(~u(90 degree_per_second))
+                      end
+
+                      link :forearm do
+                        # Wrist pitch
+                        joint :wrist_pitch do
+                          type(:revolute)
+
+                          origin do
+                            z(~u(0.2 meter))
+                          end
+
+                          axis do
+                            roll(~u(-90 degree))
+                          end
+
+                          limit do
+                            lower(~u(-90 degree))
+                            upper(~u(90 degree))
+                            effort(~u(5 newton_meter))
+                            velocity(~u(120 degree_per_second))
+                          end
+
+                          link :wrist_link do
+                            # Wrist roll
+                            joint :wrist_roll do
+                              type(:revolute)
+
+                              axis do
+                                pitch(~u(90 degree))
+                              end
+
+                              limit do
+                                lower(~u(-180 degree))
+                                upper(~u(180 degree))
+                                effort(~u(2 newton_meter))
+                                velocity(~u(180 degree_per_second))
+                              end
+
+                              link :hand do
+                                joint :tip_joint do
+                                  type(:fixed)
+
+                                  origin do
+                                    z(~u(0.1 meter))
+                                  end
+
+                                  link(:tip)
+                                end
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
 end

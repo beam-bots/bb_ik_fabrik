@@ -67,7 +67,7 @@ defmodule BB.IK.FABRIK.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:bb, "~> 0.8"},
+      {:bb, "~> 0.10"},
 
       # dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
