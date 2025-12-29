@@ -59,10 +59,13 @@ case BB.IK.FABRIK.solve(robot, state, :end_effector, target) do
     IO.puts("Solved in #{meta.iterations} iterations")
     IO.puts("Final distance to target: #{meta.residual}m")
 
-  {:error, :unreachable, meta} ->
+  {:error, %BB.Error.Kinematics.Unreachable{residual: residual, positions: positions}} ->
     # Target is beyond the robot's reach
-    IO.puts("Target unreachable, best distance: #{meta.residual}m")
-    # meta.positions contains best-effort joint values
+    IO.puts("Target unreachable, best distance: #{residual}m")
+    # positions contains best-effort joint values
+
+  {:error, %BB.Error.Kinematics.NoSolution{}} ->
+    IO.puts("Failed to converge within max iterations")
 end
 ```
 
@@ -87,9 +90,9 @@ case BB.IK.FABRIK.solve_and_update(robot, state, :end_effector, target) do
     # State has already been updated
     :ok
 
-  {:error, reason, meta} ->
+  {:error, %BB.Error.Kinematics.Unreachable{} = error} ->
     # State is unchanged on error
-    {:error, reason}
+    {:error, error}
 end
 ```
 
@@ -120,7 +123,6 @@ When using orientation constraints, the result metadata includes `orientation_re
 ## Supported Arm Configurations
 
 FABRIK works best with **simple planar or spatial arms** where:
-- Each joint is at a **distinct position** (no co-located joints)
 - Joints have **significant lever arms** between them
 - The arm has **2-4 degrees of freedom**
 
@@ -130,27 +132,27 @@ FABRIK works best with **simple planar or spatial arms** where:
 - **3-link arms**: Shoulder + elbow + wrist with distinct positions
 - **SCARA-style arms**: Horizontal joints with vertical offsets
 - **Simple grippers**: Where the end-effector is offset from the last joint
+- **Arms with co-located joints** (spherical wrists/shoulders): Handled via orientation-based angle extraction
 
 ### Limited Support
 
 - **6-DOF anthropomorphic arms** (e.g., WidowX, Kinova): FABRIK converges in point-space but may not find kinematically valid configurations. The algorithm distributes movement toward the end-effector rather than through shoulder/elbow rotation.
-- **Arms with co-located joints** (spherical wrists/shoulders): Multiple joints at the same position cannot be resolved from direction changes alone.
 
 ## Limitations
 
 - **Serial chains only**: Does not support branching topologies
-- **No joint axis constraints**: FABRIK moves points to satisfy distance constraints without respecting joint rotation axes. This means the algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses.
+- **No joint axis constraints**: FABRIK moves points to satisfy distance constraints without fully respecting joint rotation axes. This means the algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses.
 - **Collinear targets**: FABRIK can struggle when the target lies on the same line as a straight chain
-- **Co-located joints**: Robots with multiple joints at the same position (spherical shoulders, wrists with multiple axes at one point) cannot be solved correctly because there is insufficient information to determine individual joint angles.
 - **Mostly-vertical configurations**: Arms that start nearly vertical (like many 6-DOF arms at home position) may have poor convergence because FABRIK tends to bend the end-effector joints rather than the shoulder/elbow.
+- **Orientation solving is heuristic**: Orientation targets converge via frame propagation, which may not find optimal solutions for all arm geometries.
 
 ### When to Use a Different Solver
 
 Consider analytical IK or Jacobian-based methods when:
 - You have a 6-DOF arm with specific geometry (closed-form solutions exist)
 - You need precise control over which joints move
-- Your arm has spherical wrist/shoulder configurations
 - You need to optimise for specific joint configurations (elbow up vs down)
+- You require guaranteed orientation accuracy for complex arm geometries
 
 ## Documentation
 

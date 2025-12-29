@@ -8,11 +8,14 @@ defmodule BB.IK.FABRIK do
 
   FABRIK (Forward And Backward Reaching Inverse Kinematics) is an iterative
   solver that works by alternately reaching from the end-effector toward the
-  target, then from the base back to maintain segment lengths.
+  target, then from the base back to maintain segment lengths. This implementation
+  extends classic FABRIK with orientation tracking at each joint frame.
 
   ## Features
 
   - Works with `BB.Robot.State` or plain position maps
+  - Position and orientation solving (quaternion or axis constraints)
+  - Handles co-located joints via orientation-based angle extraction
   - Respects joint limits by clamping solved values
   - Uses Nx tensors for efficient computation
   - Returns best-effort positions even on failure
@@ -23,7 +26,7 @@ defmodule BB.IK.FABRIK do
       {:ok, state} = BB.Robot.State.new(robot)
 
       # Solve for end-effector to reach target position
-      target = {0.4, 0.2, 0.1}
+      target = Vec3.new(0.4, 0.2, 0.1)
 
       case BB.IK.FABRIK.solve(robot, state, :end_effector, target) do
         {:ok, positions, meta} ->
@@ -34,17 +37,25 @@ defmodule BB.IK.FABRIK do
           IO.puts("Target unreachable, residual: \#{residual}m")
       end
 
+  ## Target Formats
+
+  - `Vec3.t()` - Position-only target
+  - `Transform.t()` - Position + full orientation from transform
+  - `{Vec3.t(), {:quaternion, Quaternion.t()}}` - Position + explicit quaternion
+  - `{Vec3.t(), {:axis, Vec3.t()}}` - Position + tool axis direction constraint
+
   ## Options
 
   - `:max_iterations` - Maximum solver iterations (default: 50)
-  - `:tolerance` - Convergence tolerance in metres (default: 1.0e-4)
+  - `:tolerance` - Position convergence tolerance in metres (default: 1.0e-4)
+  - `:orientation_tolerance` - Orientation convergence tolerance in radians (default: 0.01)
   - `:respect_limits` - Whether to clamp to joint limits (default: true)
 
   ## Limitations
 
-  - Position-only solving (orientation not yet supported)
   - Serial chains only (no branching topologies)
   - Revolute and prismatic joints (fixed joints are skipped)
+  - Orientation solving is heuristic and may not find optimal solutions for all geometries
   """
 
   @behaviour BB.IK.Solver
