@@ -11,6 +11,23 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.3.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.2.0...v0.3.0) (2025-12-29)
+
+
+
+
+### Features:
+
+* orientation-aware FABRIK with co-located joint handling (#6) by James Harton
+
+* update FABRIK to use Vec3 targets and orientation types by James Harton
+
+* add orientation-aware FABRIK solving with axis constraints by James Harton
+
+### Improvements:
+
+* use orientation-aware FABRIK internally for all solves by James Harton
+
 ## [v0.2.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.1.0...v0.2.0) (2025-12-18)
 
 
