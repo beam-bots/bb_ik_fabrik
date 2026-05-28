@@ -4,35 +4,23 @@
 
 defmodule BB.IK.TestRobots.MockActuator do
   @moduledoc """
-  Minimal mock actuator for testing.
+  Minimal mock actuator for testing — a proper `BB.Actuator` callback module
+  that accepts commands and discards them.
   """
-  use GenServer
+  use BB.Actuator, options_schema: []
 
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: via(opts))
-  end
+  @impl BB.Actuator
+  def init(opts), do: {:ok, %{opts: opts}}
 
-  defp via(opts) do
-    BB.Process.via(opts[:bb][:robot], opts[:bb][:name])
-  end
+  @impl BB.Actuator
+  def disarm(_opts), do: :ok
 
-  @impl GenServer
-  def init(opts) do
-    {:ok, %{opts: opts}}
-  end
+  @impl BB.Actuator
+  def handle_cast({:command, _message}, state), do: {:noreply, state}
 
-  @impl GenServer
-  def handle_cast({:command, _message}, state) do
-    {:noreply, state}
-  end
+  @impl BB.Actuator
+  def handle_call({:command, _message}, _from, state), do: {:reply, {:ok, :accepted}, state}
 
-  @impl GenServer
-  def handle_call({:command, _message}, _from, state) do
-    {:reply, {:ok, :accepted}, state}
-  end
-
-  @impl GenServer
-  def handle_info({:bb, _path, _message}, state) do
-    {:noreply, state}
-  end
+  @impl BB.Actuator
+  def handle_info({:bb, _path, _message}, state), do: {:noreply, state}
 end
