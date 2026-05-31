@@ -11,7 +11,9 @@ SPDX-License-Identifier: Apache-2.0
 [![CI](https://github.com/beam-bots/bb_ik_fabrik/actions/workflows/ci.yml/badge.svg)](https://github.com/beam-bots/bb_ik_fabrik/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Hex version badge](https://img.shields.io/hexpm/v/bb_ik_fabrik.svg)](https://hex.pm/packages/bb_ik_fabrik)
+[![Hexdocs badge](https://img.shields.io/badge/docs-hexdocs-purple)](https://hexdocs.pm/bb_ik_fabrik)
 [![REUSE status](https://api.reuse.software/badge/github.com/beam-bots/bb_ik_fabrik)](https://api.reuse.software/info/github.com/beam-bots/bb_ik_fabrik)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/beam-bots/bb_ik_fabrik)
 
 A FABRIK-based inverse kinematics solver for the [Beam Bots](https://github.com/beam-bots/bb) robotics framework.
 
