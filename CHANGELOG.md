@@ -11,6 +11,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.4.1](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.4.0...v0.4.1) (2026-06-26)
+
+
+
+
+### Improvements:
+
+* express FABRIK (position + orientation) as composable defns (#60) by James Harton
+
 ## [v0.4.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.3.2...v0.4.0) (2026-05-28)
 
 
