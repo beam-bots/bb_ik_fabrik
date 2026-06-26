@@ -10,6 +10,8 @@ defmodule BB.IK.FABRIK.Math do
   solving with orientation (`fabrik_with_orientation/7`).
   """
 
+  import Nx.Defn
+
   alias BB.Math.Quaternion
 
   @doc """
@@ -44,55 +46,103 @@ defmodule BB.IK.FABRIK.Math do
           {:ok, Nx.Tensor.t(), map()}
           | {:error, :unreachable | :max_iterations, map()}
   def fabrik(points, lengths, target, max_iterations, tolerance) do
-    root = Nx.slice(points, [0, 0], [1, 3]) |> Nx.squeeze(axes: [0])
+    root = get_point(points, 0)
     total_length = Nx.sum(lengths) |> Nx.to_number()
     dist_to_target = distance(root, target) |> Nx.to_number()
 
     if dist_to_target > total_length do
-      stretched_points = stretch_toward_target(points, lengths, target)
-      residual = dist_to_target - total_length
-
       {:error, :unreachable,
        %{
-         points: stretched_points,
+         points: stretch_toward_target(points, lengths, target),
          iterations: 0,
-         residual: residual
+         residual: dist_to_target - total_length
        }}
     else
-      iterate(points, lengths, root, target, max_iterations, tolerance, 0)
+      {solved_points, iterations, residual} =
+        solve(points, lengths, target, max_iterations, tolerance)
+
+      meta = %{
+        points: solved_points,
+        iterations: Nx.to_number(iterations),
+        residual: Nx.to_number(residual)
+      }
+
+      if meta.residual <= tolerance do
+        {:ok, solved_points, meta}
+      else
+        {:error, :max_iterations, meta}
+      end
     end
   end
 
-  defp iterate(points, _lengths, _root, target, max_iterations, _tolerance, iteration)
-       when iteration >= max_iterations do
-    end_effector = get_end_effector(points)
-    residual = distance(end_effector, target) |> Nx.to_number()
+  @doc """
+  Run the FABRIK iteration loop until convergence or `max_iterations`.
 
-    {:error, :max_iterations,
-     %{
-       points: points,
-       iterations: iteration,
-       residual: residual
-     }}
+  Composable `defn` entry point. Returns `{points, iterations, residual}` as
+  tensors — `fabrik/5` wraps this with the reachability check and `{:ok, ...}`
+  classification. Each iteration runs `backward_pass/3` then `forward_pass/3`.
+  Built from `defn` so it can be composed into larger numerical pipelines and
+  vectorised over a leading batch axis (e.g. solving many legs of a gait at
+  once).
+  """
+  @spec solve(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), pos_integer(), float()) ::
+          {Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()}
+  defn solve(points, lengths, target, max_iterations, tolerance) do
+    root = points[0]
+
+    {solved, _lengths, _target, _root, _max, _tol, iterations, residual} =
+      while {pts = points, lens = lengths, tgt = target, rt = root, max = max_iterations,
+             tol = tolerance, i = 0, residual = Nx.as_type(tolerance, :f64) + 1.0},
+            i < max and residual > tol do
+        pts = backward_pass(pts, lens, tgt)
+        pts = forward_pass(pts, lens, rt)
+        tip = pts[Nx.axis_size(pts, 0) - 1]
+        {pts, lens, tgt, rt, max, tol, i + 1, distance(tip, tgt)}
+      end
+
+    {solved, iterations, residual}
   end
 
-  defp iterate(points, lengths, root, target, max_iterations, tolerance, iteration) do
-    points = backward_pass(points, lengths, target)
-    points = forward_pass(points, lengths, root)
+  @doc """
+  FABRIK backward reaching pass.
 
-    end_effector = get_end_effector(points)
-    residual = distance(end_effector, target) |> Nx.to_number()
+  Pins the end effector to `target`, then walks toward the root placing each
+  joint at its segment length from the next. `points` is `{n, 3}`, `lengths`
+  `{n - 1}`. Returns the updated `{n, 3}` points.
+  """
+  @spec backward_pass(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  defn backward_pass(points, lengths, target) do
+    n = Nx.axis_size(points, 0)
+    points = Nx.put_slice(points, [n - 1, 0], Nx.new_axis(target, 0))
 
-    if residual <= tolerance do
-      {:ok, points,
-       %{
-         points: points,
-         iterations: iteration + 1,
-         residual: residual
-       }}
-    else
-      iterate(points, lengths, root, target, max_iterations, tolerance, iteration + 1)
-    end
+    {result, _lengths, _i} =
+      while {pts = points, lens = lengths, i = n - 2}, i >= 0 do
+        new_point = move_point_toward(pts[i], pts[i + 1], lens[i])
+        {Nx.put_slice(pts, [i, 0], Nx.new_axis(new_point, 0)), lens, i - 1}
+      end
+
+    result
+  end
+
+  @doc """
+  FABRIK forward reaching pass.
+
+  Pins the root to `root`, then walks toward the end effector placing each joint
+  at its segment length from the previous. `points` is `{n, 3}`, `lengths`
+  `{n - 1}`. Returns the updated `{n, 3}` points.
+  """
+  @spec forward_pass(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  defn forward_pass(points, lengths, root) do
+    n = Nx.axis_size(points, 0)
+    points = Nx.put_slice(points, [0, 0], Nx.new_axis(root, 0))
+
+    {result, _lengths, _i} =
+      while {pts = points, lens = lengths, i = 0}, i < n - 1 do
+        new_point = move_point_toward(pts[i + 1], pts[i], lens[i])
+        {Nx.put_slice(pts, [i + 1, 0], Nx.new_axis(new_point, 0)), lens, i + 1}
+      end
+
+    result
   end
 
   # ===========================================================================
@@ -473,38 +523,6 @@ defmodule BB.IK.FABRIK.Math do
   # Position-only helpers (existing)
   # ===========================================================================
 
-  defp backward_pass(points, lengths, target) do
-    n = Nx.axis_size(points, 0)
-    num_segments = n - 1
-
-    points = put_point(points, n - 1, target)
-
-    Enum.reduce((num_segments - 1)..0//-1, points, fn i, points ->
-      p_next = get_point(points, i + 1)
-      p_curr = get_point(points, i)
-      len = Nx.slice(lengths, [i], [1]) |> Nx.squeeze()
-
-      new_point = move_point_toward(p_curr, p_next, len)
-      put_point(points, i, new_point)
-    end)
-  end
-
-  defp forward_pass(points, lengths, root) do
-    n = Nx.axis_size(points, 0)
-    num_segments = n - 1
-
-    points = put_point(points, 0, root)
-
-    Enum.reduce(0..(num_segments - 1)//1, points, fn i, points ->
-      p_curr = get_point(points, i)
-      p_next = get_point(points, i + 1)
-      len = Nx.slice(lengths, [i], [1]) |> Nx.squeeze()
-
-      new_point = move_point_toward(p_next, p_curr, len)
-      put_point(points, i + 1, new_point)
-    end)
-  end
-
   defp stretch_toward_target(points, lengths, target) do
     n = Nx.axis_size(points, 0)
     num_segments = n - 1
@@ -523,19 +541,18 @@ defmodule BB.IK.FABRIK.Math do
     end)
   end
 
-  defp move_point_toward(point_to_move, anchor, desired_distance) do
-    direction = Nx.subtract(point_to_move, anchor)
+  @doc """
+  Place a point at `desired_distance` from `anchor`, along the direction from
+  `anchor` toward `point_to_move`. The per-joint reaching step shared by both
+  passes; a `defn` so it composes into them and is reusable on its own.
+  """
+  defn move_point_toward(point_to_move, anchor, desired_distance) do
+    direction = point_to_move - anchor
     current_distance = Nx.LinAlg.norm(direction)
+    safe_distance = Nx.select(current_distance < 1.0e-10, 1.0, current_distance)
+    unit_dir = direction / safe_distance
 
-    safe_distance =
-      Nx.select(
-        Nx.less(current_distance, 1.0e-10),
-        Nx.tensor(1.0, type: :f64),
-        current_distance
-      )
-
-    unit_dir = Nx.divide(direction, safe_distance)
-    Nx.add(anchor, Nx.multiply(unit_dir, desired_distance))
+    anchor + unit_dir * desired_distance
   end
 
   defp get_point(points, index) do
@@ -554,7 +571,7 @@ defmodule BB.IK.FABRIK.Math do
     get_point(points, n - 1)
   end
 
-  defp distance(p1, p2) do
-    Nx.subtract(p1, p2) |> Nx.LinAlg.norm()
+  defn distance(p1, p2) do
+    Nx.LinAlg.norm(p1 - p2)
   end
 end
