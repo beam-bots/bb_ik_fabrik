@@ -16,11 +16,5 @@ defmodule BB.IK.TestRobots.MockActuator do
   def disarm(_opts), do: :ok
 
   @impl BB.Actuator
-  def handle_cast({:command, _message}, state), do: {:noreply, state}
-
-  @impl BB.Actuator
-  def handle_call({:command, _message}, _from, state), do: {:reply, {:ok, :accepted}, state}
-
-  @impl BB.Actuator
-  def handle_info({:bb, _path, _message}, state), do: {:noreply, state}
+  def handle_command(_message, state), do: {:noreply, state}
 end
