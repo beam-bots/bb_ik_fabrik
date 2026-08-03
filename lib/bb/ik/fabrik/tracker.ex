@@ -64,7 +64,7 @@ defmodule BB.IK.FABRIK.Tracker do
     :delivery,
     :solver_opts,
     :update_rate,
-    :timer_ref,
+    :loop,
     :last_positions,
     :last_meta,
     :last_update,
@@ -134,12 +134,14 @@ defmodule BB.IK.FABRIK.Tracker do
       delivery: delivery,
       solver_opts: solver_opts,
       update_rate: update_rate,
+      loop:
+        BB.Loop.new(%{robot: robot_module, path: [:ik_tracker, target_link]},
+          clock: {:rate, update_rate}
+        ),
       tracking: true
     }
 
-    timer_ref = schedule_tick(update_rate)
-
-    {:ok, %{state | timer_ref: timer_ref}}
+    {:ok, %{state | loop: BB.Loop.arm(state.loop)}}
   end
 
   @impl GenServer
@@ -167,7 +169,7 @@ defmodule BB.IK.FABRIK.Tracker do
 
   @impl GenServer
   def handle_call({:stop, opts}, _from, state) do
-    if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+    BB.Loop.cancel(state.loop)
 
     if opts[:hold] do
       send_hold_commands(state)
@@ -178,16 +180,13 @@ defmodule BB.IK.FABRIK.Tracker do
 
   @impl GenServer
   def handle_info(:tick, state) do
-    state = do_solve_and_send(state)
+    {_dt, _skipped, loop} = BB.Loop.tick(state.loop)
+    state = do_solve_and_send(%{state | loop: loop})
 
-    timer_ref =
-      if state.tracking do
-        schedule_tick(state.update_rate)
-      else
-        nil
-      end
+    # tick/1 has already armed the next one, so stopping means cancelling it.
+    loop = if state.tracking, do: state.loop, else: BB.Loop.cancel(state.loop)
 
-    {:noreply, %{state | timer_ref: timer_ref}}
+    {:noreply, %{state | loop: loop}}
   end
 
   defp do_solve_and_send(state) do
@@ -236,10 +235,5 @@ defmodule BB.IK.FABRIK.Tracker do
     Enum.each(state.robot.actuators, fn {name, _info} ->
       BB.Actuator.hold!(state.robot_module, name)
     end)
-  end
-
-  defp schedule_tick(update_rate) do
-    interval = div(1000, update_rate)
-    Process.send_after(self(), :tick, interval)
   end
 end
