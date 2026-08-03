@@ -11,6 +11,17 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.5.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.4.1...v0.5.0) (2026-08-03)
+### Breaking Changes:
+
+* migrate the test mock actuator to `handle_command/2` (#81) by James Harton
+
+
+
+### Improvements:
+
+* drive the tracking loop from `BB.Loop` (#83) by James Harton
+
 ## [v0.4.1](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.4.0...v0.4.1) (2026-06-26)
 
 
