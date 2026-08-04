@@ -16,6 +16,7 @@ defmodule BB.IK.FABRIK.Tracker do
       {:ok, pid} = BB.IK.FABRIK.Tracker.start_link(
         robot: MyRobot,
         target_link: :gripper,
+        source_link: :base_link,
         initial_target: {0.3, 0.2, 0.1},
         update_rate: 30
       )
@@ -33,6 +34,7 @@ defmodule BB.IK.FABRIK.Tracker do
 
   - `:robot` - Robot module (required)
   - `:target_link` - Link to track (required)
+  - `:source_link` - Link the chain starts at (required, no default)
   - `:initial_target` - Starting target position (required)
   - `:update_rate` - Solve frequency in Hz (default: 20)
   - `:delivery` - Actuator command delivery: `:direct` (default), `:pubsub`, `:sync`
@@ -60,6 +62,7 @@ defmodule BB.IK.FABRIK.Tracker do
     :robot,
     :robot_state,
     :target_link,
+    :source_link,
     :target,
     :delivery,
     :solver_opts,
@@ -113,6 +116,7 @@ defmodule BB.IK.FABRIK.Tracker do
   def init(opts) do
     robot_module = Keyword.fetch!(opts, :robot)
     target_link = Keyword.fetch!(opts, :target_link)
+    source_link = Keyword.fetch!(opts, :source_link)
     initial_target = Keyword.fetch!(opts, :initial_target)
 
     update_rate = Keyword.get(opts, :update_rate, @default_update_rate)
@@ -130,6 +134,7 @@ defmodule BB.IK.FABRIK.Tracker do
       robot: robot,
       robot_state: robot_state,
       target_link: target_link,
+      source_link: source_link,
       target: initial_target,
       delivery: delivery,
       solver_opts: solver_opts,
@@ -193,15 +198,14 @@ defmodule BB.IK.FABRIK.Tracker do
     motion_opts =
       state.solver_opts
       |> Keyword.put(:solver, FABRIK)
+      |> Keyword.put(:source_link, state.source_link)
       |> Keyword.put(:delivery, state.delivery)
 
     case Motion.move_to(state.robot_module, state.target_link, state.target, motion_opts) do
       {:ok, meta} ->
-        positions = get_current_positions(state)
-
         %{
           state
-          | last_positions: positions,
+          | last_positions: RobotState.get_all_configurations(state.robot_state),
             last_meta: meta,
             last_update: DateTime.utc_now()
         }
@@ -213,21 +217,6 @@ defmodule BB.IK.FABRIK.Tracker do
         }
 
         %{state | last_meta: meta}
-    end
-  end
-
-  defp get_current_positions(state) do
-    case Map.get(state.robot.joints, state.target_link) do
-      nil ->
-        %{}
-
-      _joint ->
-        state.robot.joints
-        |> Map.keys()
-        |> Enum.reduce(%{}, fn joint_name, acc ->
-          pos = RobotState.get_joint_position(state.robot_state, joint_name)
-          Map.put(acc, joint_name, pos)
-        end)
     end
   end
 

@@ -5,7 +5,9 @@
 defmodule BB.IK.FABRIK.Chain do
   @moduledoc false
 
+  alias BB.Error.Kinematics.FABRIK.UnsupportedJoint
   alias BB.Error.Kinematics.NoDofs
+  alias BB.Error.Kinematics.NotAnAncestor
   alias BB.Error.Kinematics.UnknownLink
   alias BB.Math.Quaternion
   alias BB.Math.Transform
@@ -50,46 +52,68 @@ defmodule BB.IK.FABRIK.Chain do
   ## Parameters
 
   - `robot` - The BB.Robot struct
-  - `positions` - Current joint positions as a map
+  - `configurations` - Current joint configurations as a map
+  - `source_link` - The link the chain starts at
   - `target_link` - The end-effector link name
 
   ## Returns
 
   - `{:ok, chain}` - Successfully built chain
-  - `{:error, %UnknownLink{}}` - Target link not found
+  - `{:error, %UnknownLink{}}` - Source or target link not found; `:role` says which
+  - `{:error, %NotAnAncestor{}}` - Source link does not sit above the target
   - `{:error, %NoDofs{}}` - Chain has no movable joints
+  - `{:error, %UnsupportedJoint{}}` - Chain contains a `:planar` or `:floating` joint
   """
-  @spec build(Robot.t(), %{atom() => float()}, atom()) ::
-          {:ok, t()} | {:error, UnknownLink.t() | NoDofs.t()}
-  def build(%Robot{} = robot, positions, target_link) when is_map(positions) do
-    case Robot.path_to(robot, target_link) do
+  @spec build(Robot.t(), %{atom() => Kinematics.configuration()}, atom(), atom()) ::
+          {:ok, t()}
+          | {:error, UnknownLink.t() | NotAnAncestor.t() | NoDofs.t() | UnsupportedJoint.t()}
+  def build(%Robot{} = robot, configurations, source_link, target_link)
+      when is_map(configurations) do
+    with {:ok, path} <- Robot.path_between(robot, source_link, target_link),
+         joints = chain_joints(robot, path),
+         :ok <- reject_multi_dof(joints, source_link, target_link),
+         {:ok, movable} <- movable_joints(joints, target_link, length(path)) do
+      {:ok,
+       build_chain_data(
+         robot,
+         configurations,
+         Enum.map(movable, & &1.joint),
+         Enum.map(movable, & &1.name),
+         target_link
+       )}
+    end
+  end
+
+  defp chain_joints(robot, path) do
+    path
+    |> Enum.filter(&Map.has_key?(robot.joints, &1))
+    |> Enum.map(&%{name: &1, joint: Map.fetch!(robot.joints, &1)})
+  end
+
+  # Refusing beats approximating. FABRIK repositions each joint as a point joined
+  # by a fixed-length link, and a multi-DoF joint is neither — silently ignoring
+  # its extra degrees of freedom would produce an answer indistinguishable from a
+  # correct one.
+  defp reject_multi_dof(joints, source_link, target_link) do
+    case Enum.find(joints, &(&1.joint.type in [:planar, :floating])) do
       nil ->
-        {:error, %UnknownLink{target_link: target_link}}
+        :ok
 
-      path ->
-        # Get all joints in the path
-        all_joint_names =
-          path
-          |> Enum.filter(&Map.has_key?(robot.joints, &1))
+      %{name: name, joint: joint} ->
+        {:error,
+         UnsupportedJoint.exception(
+           joint: name,
+           joint_type: joint.type,
+           source_link: source_link,
+           target_link: target_link
+         )}
+    end
+  end
 
-        all_joints = Enum.map(all_joint_names, &Robot.get_joint(robot, &1))
-
-        # Filter to only movable joints for the chain
-        movable_joint_names =
-          Enum.zip(all_joint_names, all_joints)
-          |> Enum.filter(fn {_name, joint} -> Joint.movable?(joint) end)
-          |> Enum.map(fn {name, _joint} -> name end)
-
-        movable_joints = Enum.filter(all_joints, &Joint.movable?/1)
-
-        if Enum.empty?(movable_joints) do
-          {:error, %NoDofs{target_link: target_link, chain_length: length(path)}}
-        else
-          chain =
-            build_chain_data(robot, positions, movable_joints, movable_joint_names, target_link)
-
-          {:ok, chain}
-        end
+  defp movable_joints(joints, target_link, path_length) do
+    case Enum.filter(joints, &Joint.movable?(&1.joint)) do
+      [] -> {:error, NoDofs.exception(target_link: target_link, chain_length: path_length)}
+      movable -> {:ok, movable}
     end
   end
 
@@ -115,7 +139,7 @@ defmodule BB.IK.FABRIK.Chain do
     chain.joint_names
     |> Enum.with_index()
     |> Enum.reduce(%{}, fn {joint_name, idx}, acc ->
-      joint = Robot.get_joint(robot, joint_name)
+      {:ok, joint} = Robot.get_joint(robot, joint_name)
       compute_and_add_position(acc, joint_name, idx, joint, chain, solved_points, respect_limits?)
     end)
   end
@@ -142,7 +166,7 @@ defmodule BB.IK.FABRIK.Chain do
     chain.joint_names
     |> Enum.with_index()
     |> Enum.reduce(%{}, fn {joint_name, idx}, acc ->
-      joint = Robot.get_joint(robot, joint_name)
+      {:ok, joint} = Robot.get_joint(robot, joint_name)
 
       compute_and_add_position_from_frames(
         acc,

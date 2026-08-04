@@ -80,6 +80,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
                Tracker.start_link(
                  robot: TrackerTestRobot,
                  target_link: :tip,
+                 source_link: :base_link,
                  initial_target: Vec3.new(0.35, 0.2, 0.0)
                )
 
@@ -94,6 +95,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
                Tracker.start_link(
                  robot: TrackerTestRobot,
                  target_link: :tip,
+                 source_link: :base_link,
                  initial_target: Vec3.new(0.35, 0.2, 0.0),
                  name: :test_tracker
                )
@@ -111,6 +113,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
@@ -131,6 +134,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0),
           update_rate: 10
         )
@@ -157,6 +161,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
@@ -177,6 +182,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
@@ -195,6 +201,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0),
           update_rate: 20
         )
@@ -231,6 +238,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
         Tracker.start_link(
           robot: TrackerTestRobot,
           target_link: :tip,
+          source_link: :base_link,
           initial_target: Vec3.new(0.35, 0.2, 0.0),
           max_iterations: 10,
           tolerance: 0.01,
