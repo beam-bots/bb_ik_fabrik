@@ -11,6 +11,13 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.6.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.5.0...v0.6.0) (2026-08-04)
+### Breaking Changes:
+
+* refuse multi-DoF chains, and scope solves with `source_link` (#86) by James Harton
+
+
+
 ## [v0.5.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.4.1...v0.5.0) (2026-08-03)
 ### Breaking Changes:
 
