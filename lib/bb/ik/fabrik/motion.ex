@@ -12,13 +12,13 @@ defmodule BB.IK.FABRIK.Motion do
   ## Single Target
 
       # Move end-effector to target position
-      case BB.IK.FABRIK.Motion.move_to(MyRobot, :gripper, {0.3, 0.2, 0.1}) do
+      case BB.IK.FABRIK.Motion.move_to(MyRobot, :gripper, {0.3, 0.2, 0.1}, source_link: :base_link) do
         {:ok, meta} -> IO.puts("Reached in \#{meta.iterations} iterations")
         {:error, reason, _meta} -> IO.puts("Failed: \#{reason}")
       end
 
       # Just solve without moving (for validation)
-      case BB.IK.FABRIK.Motion.solve(MyRobot, :gripper, {0.3, 0.2, 0.1}) do
+      case BB.IK.FABRIK.Motion.solve(MyRobot, :gripper, {0.3, 0.2, 0.1}, source_link: :base_link) do
         {:ok, positions, meta} -> IO.inspect(positions)
         {:error, reason, _meta} -> IO.puts("Unreachable: \#{reason}")
       end
@@ -27,7 +27,7 @@ defmodule BB.IK.FABRIK.Motion do
 
       targets = %{left_foot: {0.1, 0.0, 0.0}, right_foot: {-0.1, 0.0, 0.0}}
 
-      case BB.IK.FABRIK.Motion.move_to_multi(MyRobot, targets) do
+      case BB.IK.FABRIK.Motion.move_to_multi(MyRobot, targets, source_link: :base_link) do
         {:ok, results} -> IO.puts("All targets reached")
         {:error, failed, reason, _} -> IO.puts("Failed: \#{failed}: \#{reason}")
       end
@@ -38,7 +38,7 @@ defmodule BB.IK.FABRIK.Motion do
 
       @impl BB.Command
       def handle_command(%{target: target}, context, state) do
-        case BB.IK.FABRIK.Motion.move_to(context, :gripper, target) do
+        case BB.IK.FABRIK.Motion.move_to(context, :gripper, target, source_link: :base_link) do
           {:ok, meta} ->
             {:stop, :normal, %{state | result: %{residual: meta.residual}}}
 
@@ -85,6 +85,9 @@ defmodule BB.IK.FABRIK.Motion do
   - `:max_iterations` - Maximum FABRIK iterations (default: 50)
   - `:tolerance` - Convergence tolerance in metres (default: 1.0e-4)
   - `:respect_limits` - Whether to clamp to joint limits (default: true)
+  - `:source_link` - Link the chain starts at (**required**, no default). The chain
+    must contain no `:planar` or `:floating` joint — FABRIK cannot solve those, so
+    scope past them or use a Jacobian-based solver such as `BB.IK.DLS`
 
   Motion:
   - `:delivery` - How to send actuator commands: `:pubsub` (default), `:direct`, or `:sync`
@@ -96,9 +99,10 @@ defmodule BB.IK.FABRIK.Motion do
 
   ## Examples
 
-      BB.IK.FABRIK.Motion.move_to(MyRobot, :gripper, {0.3, 0.2, 0.1})
+      BB.IK.FABRIK.Motion.move_to(MyRobot, :gripper, {0.3, 0.2, 0.1}, source_link: :base_link)
 
       BB.IK.FABRIK.Motion.move_to(context, :gripper, target,
+        source_link: :base_link,
         delivery: :direct,
         max_iterations: 100,
         tolerance: 0.001
@@ -121,6 +125,9 @@ defmodule BB.IK.FABRIK.Motion do
   - `:max_iterations` - Maximum FABRIK iterations (default: 50)
   - `:tolerance` - Convergence tolerance in metres (default: 1.0e-4)
   - `:respect_limits` - Whether to clamp to joint limits (default: true)
+  - `:source_link` - Link the chain starts at (**required**, no default). The chain
+    must contain no `:planar` or `:floating` joint — FABRIK cannot solve those, so
+    scope past them or use a Jacobian-based solver such as `BB.IK.DLS`
 
   ## Returns
 
@@ -129,7 +136,7 @@ defmodule BB.IK.FABRIK.Motion do
 
   ## Examples
 
-      case BB.IK.FABRIK.Motion.solve(MyRobot, :gripper, target) do
+      case BB.IK.FABRIK.Motion.solve(MyRobot, :gripper, target, source_link: :base_link) do
         {:ok, positions, %{reached: true}} ->
           IO.puts("Target reachable")
           IO.inspect(positions)
@@ -169,7 +176,7 @@ defmodule BB.IK.FABRIK.Motion do
         right_foot: {-0.1, 0.0, 0.0}
       }
 
-      case BB.IK.FABRIK.Motion.move_to_multi(MyRobot, targets) do
+      case BB.IK.FABRIK.Motion.move_to_multi(MyRobot, targets, source_link: :base_link) do
         {:ok, results} ->
           IO.puts("All limbs positioned")
 
@@ -201,7 +208,7 @@ defmodule BB.IK.FABRIK.Motion do
 
       targets = %{left_foot: {0.1, 0.0, 0.0}, right_foot: {-0.1, 0.0, 0.0}}
 
-      case BB.IK.FABRIK.Motion.solve_multi(MyRobot, targets) do
+      case BB.IK.FABRIK.Motion.solve_multi(MyRobot, targets, source_link: :base_link) do
         {:ok, results} ->
           Enum.each(results, fn {link, {:ok, _pos, meta}} ->
             IO.puts("\#{link}: \#{meta.residual}m residual")
@@ -218,6 +225,11 @@ defmodule BB.IK.FABRIK.Motion do
   end
 
   defp build_motion_opts(opts) do
+    # Required, with no default: the root is right for a fixed-base arm and
+    # silently wrong for a robot whose base floats — and for FABRIK a floating
+    # base in the chain is not merely wrong but unsolvable.
+    source_link = Keyword.fetch!(opts, :source_link)
+
     fabrik_opts =
       @default_opts
       |> Keyword.merge(Keyword.take(opts, [:max_iterations, :tolerance, :respect_limits]))
@@ -226,5 +238,6 @@ defmodule BB.IK.FABRIK.Motion do
     |> Keyword.take([:delivery])
     |> Keyword.merge(fabrik_opts)
     |> Keyword.put(:solver, FABRIK)
+    |> Keyword.put(:source_link, source_link)
   end
 end

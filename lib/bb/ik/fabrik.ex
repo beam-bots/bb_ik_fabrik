@@ -30,7 +30,7 @@ defmodule BB.IK.FABRIK do
 
       case BB.IK.FABRIK.solve(robot, state, :end_effector, target) do
         {:ok, positions, meta} ->
-          BB.Robot.State.set_positions(state, positions)
+          BB.Robot.State.set_configurations(state, configurations)
           IO.puts("Solved in \#{meta.iterations} iterations")
 
         {:error, %BB.Error.Kinematics.Unreachable{residual: residual}} ->
@@ -73,16 +73,17 @@ defmodule BB.IK.FABRIK do
   @default_tolerance 1.0e-4
 
   @impl true
-  @spec solve(Robot.t(), State.t() | map(), atom(), BB.IK.Solver.target(), keyword()) ::
+  @spec solve(Robot.t(), State.t() | map(), atom(), atom(), BB.IK.Solver.target(), keyword()) ::
           BB.IK.Solver.solve_result()
-  def solve(robot, state_or_positions, target_link, target, opts \\ [])
+  def solve(robot, state_or_configurations, source_link, target_link, target, opts \\ [])
 
-  def solve(%Robot{} = robot, %State{} = state, target_link, target, opts) do
-    positions = State.get_all_positions(state)
-    solve(robot, positions, target_link, target, opts)
+  def solve(%Robot{} = robot, %State{} = state, source_link, target_link, target, opts) do
+    configurations = State.get_all_configurations(state)
+    solve(robot, configurations, source_link, target_link, target, opts)
   end
 
-  def solve(%Robot{} = robot, positions, target_link, target, opts) when is_map(positions) do
+  def solve(%Robot{} = robot, positions, source_link, target_link, target, opts)
+      when is_map(positions) do
     max_iterations = Keyword.get(opts, :max_iterations, @default_max_iterations)
     tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
     orientation_tolerance = Keyword.get(opts, :orientation_tolerance, 0.01)
@@ -90,7 +91,7 @@ defmodule BB.IK.FABRIK do
 
     {target_point, orientation_target} = normalize_target(target)
 
-    case Chain.build(robot, positions, target_link) do
+    case Chain.build(robot, positions, source_link, target_link) do
       {:error, error} ->
         {:error, error}
 
@@ -230,20 +231,33 @@ defmodule BB.IK.FABRIK do
   @doc """
   Solve IK and update the state in-place.
 
-  Convenience function that calls `solve/5` and applies the result
+  Convenience function that calls `solve/6` and applies the result
   to the given `BB.Robot.State`.
 
   ## Returns
 
-  Same as `solve/5`, but on success the state's ETS table is updated.
+  Same as `solve/6`, but on success the state's ETS table is updated.
   """
-  @spec solve_and_update(Robot.t(), State.t(), atom(), BB.IK.Solver.target(), keyword()) ::
-          BB.IK.Solver.solve_result()
-  def solve_and_update(%Robot{} = robot, %State{} = state, target_link, target, opts \\ []) do
-    case solve(robot, state, target_link, target, opts) do
-      {:ok, positions, meta} ->
-        State.set_positions(state, positions)
-        {:ok, positions, meta}
+  @spec solve_and_update(
+          Robot.t(),
+          State.t(),
+          atom(),
+          atom(),
+          BB.IK.Solver.target(),
+          keyword()
+        ) :: BB.IK.Solver.solve_result()
+  def solve_and_update(
+        %Robot{} = robot,
+        %State{} = state,
+        source_link,
+        target_link,
+        target,
+        opts \\ []
+      ) do
+    case solve(robot, state, source_link, target_link, target, opts) do
+      {:ok, configurations, meta} ->
+        State.set_configurations(state, configurations)
+        {:ok, configurations, meta}
 
       {:error, _error} = error ->
         error

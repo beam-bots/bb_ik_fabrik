@@ -18,7 +18,7 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      assert {:ok, chain} = Chain.build(robot, positions, :tip)
+      assert {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       assert length(chain.joint_names) == 2
       assert :shoulder_joint in chain.joint_names
@@ -31,8 +31,8 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      assert {:error, %UnknownLink{target_link: :nonexistent}} =
-               Chain.build(robot, positions, :nonexistent)
+      assert {:error, %UnknownLink{link: :nonexistent, role: :target}} =
+               Chain.build(robot, positions, :base_link, :nonexistent)
     end
 
     test "returns error for chain with only fixed joints" do
@@ -40,14 +40,14 @@ defmodule BB.IK.FABRIK.ChainTest do
       positions = %{}
 
       assert {:error, %NoDofs{target_link: :end_link}} =
-               Chain.build(robot, positions, :end_link)
+               Chain.build(robot, positions, :base_link, :end_link)
     end
 
     test "filters out fixed joints from chain" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # tip_joint is fixed, should not be in the chain
       refute :tip_joint in chain.joint_names
@@ -57,7 +57,7 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       lengths = Nx.to_flat_list(chain.lengths)
 
@@ -70,7 +70,7 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
 
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       assert length(chain.limits) == 2
 
@@ -89,7 +89,7 @@ defmodule BB.IK.FABRIK.ChainTest do
       robot = ThreeLinkArm.robot()
       positions = %{joint1: 0.0, joint2: 0.0, joint3: 0.0}
 
-      assert {:ok, chain} = Chain.build(robot, positions, :tip)
+      assert {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       assert length(chain.joint_names) == 3
       assert :joint1 in chain.joint_names
@@ -102,11 +102,11 @@ defmodule BB.IK.FABRIK.ChainTest do
 
       # At zero position, chain is straight along X axis
       positions_zero = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain_zero} = Chain.build(robot, positions_zero, :tip)
+      {:ok, chain_zero} = Chain.build(robot, positions_zero, :base_link, :tip)
 
       # At 90 degrees shoulder rotation, chain should be along Y axis
       positions_rotated = %{shoulder_joint: :math.pi() / 2, elbow_joint: 0.0}
-      {:ok, chain_rotated} = Chain.build(robot, positions_rotated, :tip)
+      {:ok, chain_rotated} = Chain.build(robot, positions_rotated, :base_link, :tip)
 
       # Get end points
       end_zero = Nx.slice(chain_zero.points, [2, 0], [1, 3]) |> Nx.to_flat_list()
@@ -128,7 +128,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "computes revolute joint angles from solved points" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # Rotate the whole chain 45 degrees around Z axis
       angle = :math.pi() / 4
@@ -148,7 +148,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "computes elbow bend angle correctly" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # Straight first segment, then 90° bend at elbow
       solved_points = ChainHelpers.elbow_bend(lengths: [0.3, 0.2], bend_angle: :math.pi() / 2)
@@ -164,7 +164,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "clamps values to limits when respect_limits is true" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # Create points that would require angles beyond limits
       # 180° shoulder rotation and extreme elbow position
@@ -185,7 +185,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "does not clamp when respect_limits is false" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # Points representing a full 180° elbow bend (exceeds 135° limit)
       solved_points =
@@ -206,7 +206,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "handles zero-length direction vectors gracefully" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # All points collapsed to origin (degenerate case)
       solved_points = ChainHelpers.collapsed(3)
@@ -221,7 +221,7 @@ defmodule BB.IK.FABRIK.ChainTest do
     test "handles negative bend angles" do
       robot = TwoLinkArm.robot()
       positions = %{shoulder_joint: 0.0, elbow_joint: 0.0}
-      {:ok, chain} = Chain.build(robot, positions, :tip)
+      {:ok, chain} = Chain.build(robot, positions, :base_link, :tip)
 
       # Bend elbow in the opposite direction (-90°)
       solved_points = ChainHelpers.elbow_bend(lengths: [0.3, 0.2], bend_angle: -:math.pi() / 2)
