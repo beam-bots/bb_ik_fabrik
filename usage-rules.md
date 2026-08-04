@@ -25,13 +25,28 @@ the solver.
 3. **Solver options are an untyped keyword list with FABRIK-specific defaults.**
    There is no schema, and defaults differ from other solvers — FABRIK has no
    damping knobs, and its `:max_iterations` default is `50`.
+4. **FABRIK handles single-DoF joints only.** `:revolute`, `:continuous`,
+   `:prismatic` and `:fixed` are fine. A chain containing a `:planar` or
+   `:floating` joint is **refused** with
+   `BB.Error.Kinematics.FABRIK.UnsupportedJoint` — the algorithm treats each joint
+   as a point joined to the next by a fixed-length link, and a multi-DoF joint is
+   neither. Refusing beats approximating: an answer that silently dropped three or
+   six degrees of freedom would look exactly like a correct one.
+5. **That limit is about the chain, not the robot.** A legged robot whose body
+   floats is still a FABRIK problem — solve each leg from `:body` to the foot and
+   the chain contains nothing but revolute joints. `:source_link` is required and
+   has no default precisely so such a chain is expressible. When the multi-DoF
+   joint genuinely must be in the chain, use `BB.IK.DLS`.
 
 ## Using it
 
 Ad-hoc, through `BB.Motion`:
 
 ```elixir
-BB.Motion.move_to(MyRobot.Robot, :gripper, {0.4, 0.2, 0.1}, solver: BB.IK.FABRIK)
+BB.Motion.move_to(MyRobot.Robot, :gripper, {0.4, 0.2, 0.1},
+  source_link: :base_link,
+  solver: BB.IK.FABRIK
+)
 ```
 
 Declaratively, as a `BB.Command.MoveTo` entry in the DSL:
@@ -99,7 +114,7 @@ BB.IK.FABRIK.Tracker.update_target(pid, {0.35, 0.25, 0.15})
   `solver: BB.IK.FABRIK` per call.
 - **Don't reach for DLS's damping options.** FABRIK has no `:lambda` or
   `:adaptive_damping`; its `:max_iterations` default is `50`, not `100`.
-- **Don't pass the robot module to `solve/5`.** It wants the `%BB.Robot{}`
+- **Don't pass the robot module to `solve/6`.** It wants the `%BB.Robot{}`
   struct plus a state/positions map.
 
 ## Further reading

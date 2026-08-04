@@ -47,7 +47,7 @@ BB.IK.FABRIK (public API)
 - **BB.IK.Solver** (in `bb` core) - Behaviour defining the IK solver interface. Allows pluggable solvers.
 
 - **BB.IK.FABRIK** (`lib/bb/ik/fabrik.ex`) - Main public API implementing `BB.IK.Solver`. Entry points:
-  - `solve/5` - Solve IK, returns joint positions map
+  - `solve/6` - Solve IK, returns joint configurations map
   - `solve_and_update/5` - Solve and update `BB.Robot.State` in-place
 
 - **BB.IK.FABRIK.Chain** (`lib/bb/ik/fabrik/chain.ex`) - Extracts kinematic chain from `BB.Robot`:

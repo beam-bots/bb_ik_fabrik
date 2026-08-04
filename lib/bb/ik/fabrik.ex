@@ -231,7 +231,7 @@ defmodule BB.IK.FABRIK do
   @doc """
   Solve IK and update the state in-place.
 
-  Convenience function that calls `solve/5` and applies the result
+  Convenience function that calls `solve/6` and applies the result
   to the given `BB.Robot.State`.
 
   ## Returns

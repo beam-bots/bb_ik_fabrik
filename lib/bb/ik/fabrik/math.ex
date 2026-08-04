@@ -292,7 +292,7 @@ defmodule BB.IK.FABRIK.Math do
   @doc """
   Run the orientation-aware FABRIK loop until convergence or `max_iterations`.
 
-  Composable `defn` companion to `solve/5` that also tracks a `{n, 4}` quaternion
+  Composable `defn` companion to `solve/6` that also tracks a `{n, 4}` quaternion
   per joint. `enforce_ori` (`1.0`/`0.0`) selects whether the end-effector
   orientation is pinned to `target_orientation` and whether orientation
   convergence is required. Returns
