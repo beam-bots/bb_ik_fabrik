@@ -11,6 +11,13 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.7.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.6.0...v0.7.0) (2026-08-05)
+### Breaking Changes:
+
+* constrain FABRIK to the robot's real joint axes (#88) by James Harton
+
+
+
 ## [v0.6.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.5.0...v0.6.0) (2026-08-04)
 ### Breaking Changes:
 
