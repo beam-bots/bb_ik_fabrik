@@ -12,7 +12,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 BB.IK.FABRIK is a FABRIK-based inverse kinematics solver for the Beam Bots robotics framework. It computes joint angles needed to position an end-effector at a target location and orientation.
 
-**FABRIK** (Forward And Backward Reaching Inverse Kinematics) is an iterative algorithm that works by alternately reaching from the end-effector toward the target, then from the base back to maintain segment lengths. This implementation extends classic FABRIK with orientation tracking at each joint frame.
+**FABRIK** (Forward And Backward Reaching Inverse Kinematics) is an iterative algorithm that works by alternately reaching from the end-effector toward the target, then from the base back to maintain segment lengths. This implementation constrains that second pass to the robot's real joint axes, so every pose it considers is one the robot can hold — see "How a solve works" below.
 
 ## Build and Test Commands
 
@@ -50,18 +50,16 @@ BB.IK.FABRIK (public API)
   - `solve/6` - Solve IK, returns joint configurations map
   - `solve_and_update/5` - Solve and update `BB.Robot.State` in-place
 
-- **BB.IK.FABRIK.Chain** (`lib/bb/ik/fabrik/chain.ex`) - Extracts kinematic chain from `BB.Robot`:
-  - Builds point/segment representation from robot topology
-  - Converts solved frames back to joint angles via `frames_to_positions/4`
-  - Handles co-located joints (spherical shoulders/wrists) via orientation-based angle extraction
-  - Handles joint limit clamping
+- **BB.IK.FABRIK.Chain** (`lib/bb/ik/fabrik/chain.ex`) - Extracts the kinematic chain from `BB.Robot`:
+  - `kinematics/1` - the tensor description the solver walks: one row per link,
+    root-first, with fixed joints carrying an identity motion
+  - `configurations/2` - reads a solved position tensor back into joint names
+  - `reach` / `root_point` - what the reachability check needs
 
-- **BB.IK.FABRIK.Math** (`lib/bb/ik/fabrik/math.ex`) - Pure Nx FABRIK implementation:
-  - `fabrik/5` - Position-only solving
-  - `fabrik_with_orientation/7` - Full frame-based solving with orientation support
-  - Works on Nx tensors for performance
-  - Forward/backward reaching iterations
-  - Handles unreachable targets gracefully
+- **BB.IK.FABRIK.Math** (`lib/bb/ik/fabrik/math.ex`) - Pure Nx implementation:
+  - `solve_constrained/3` - the solver; vectorises over a batch axis
+  - `backward_pass/3` - the classic FABRIK reach it builds on, kept separate as
+    the one half that needs no knowledge of how the joints may move
 
 - **BB.IK.FABRIK.Motion** (`lib/bb/ik/fabrik/motion.ex`) - Convenience wrappers:
   - `move_to/4` - Solve and send actuator commands
@@ -135,7 +133,10 @@ On success, returns `{:ok, positions, meta}` where `meta` contains:
 - `iterations` - Number of FABRIK iterations performed
 - `residual` - Distance from end-effector to target (metres)
 - `orientation_residual` - Orientation error in radians (nil for position-only)
-- `reached` - Boolean, true if converged
+- `reached` - Boolean, whether `residual` is within `:tolerance` (and, for an
+  orientation target, `orientation_residual` within `:orientation_tolerance`).
+  Derived from the measured result, so `{:ok, _, %{reached: false}}` is a real
+  outcome: the solve returned its best effort and it missed.
 
 On failure, returns `{:error, error}` where error is one of:
 - `%BB.Error.Kinematics.Unreachable{}` - Target beyond workspace (includes `residual`, `positions`)
@@ -150,21 +151,48 @@ On failure, returns `{:error, error}` where error is one of:
 - 3-link arms with distinct joint positions
 - SCARA-style arms
 - Simple grippers with offset end-effectors
-- Arms with co-located joints (spherical shoulders/wrists) - orientation-based angle extraction
+- Arms with co-located joints (spherical shoulders/wrists) - each joint is fitted
+  about its own axis, so sharing a point costs nothing
 
-**Limited support:**
-- 6-DOF anthropomorphic arms (e.g., WidowX, Kinova) - converges in point-space but may not find kinematically valid configurations
-- Arms starting in mostly-vertical configurations
+### How a solve works
+
+Classic FABRIK moves points as though every joint were a ball joint, so the
+configuration it settles on generally has no counterpart in any pose the robot
+can hold. This implementation keeps FABRIK's backward reach but treats its answer
+as *desired directions*: the forward pass walks base to tip choosing, for each
+joint, the rotation about its real world axis that carries its links closest to
+those directions, clamped to its limits, and regenerates the positions beyond it
+by forward kinematics.
+
+Every pose considered is therefore one the robot can hold, and the joint values
+are the solver's output rather than something recovered from a point cloud
+afterwards.
+
+Orientation rides the same fit. Three points sit rigidly on the target link's
+axes, a lever arm out from it, and putting them where they are wanted is the same
+as pointing the frame where it is wanted. They hang off where the end effector
+*is* rather than where it is wanted, so they ask only for the turn and never
+fight the real points over the reach. How loudly they argue is set each sweep by
+the share of the total overshoot that orientation accounts for, each error
+measured against its own tolerance — so a slack `:orientation_tolerance` hands
+the sweep to position, as a caller passing one is asking for.
 
 ### Known Limitations
 
-1. **No joint axis constraints** - FABRIK moves points to satisfy distance constraints without fully respecting joint rotation axes. The algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses. This is why complex 6-DOF arms often fail despite FABRIK reporting low residuals.
-2. **Mostly-vertical configurations** - Arms that start nearly vertical have poor convergence because FABRIK tends to bend end-effector joints rather than shoulder/elbow.
-3. **Collinear targets** - FABRIK struggles when target is on the same line as a straight chain
+1. **Convergence is not guaranteed** - The solve is iterative and a minority of
+   solves exhaust `:max_iterations` rather than reaching tolerance. They return
+   best-effort positions with `reached: false`. Pose targets on a 6-DOF arm are
+   the hardest case.
+2. **Cost** - Constraining costs iterations: tens rather than the handful
+   unconstrained FABRIK needs, each one a forward-kinematics pass per joint.
+   Batch with `Nx.vectorize/2` when solving many chains, such as the legs of a
+   gait.
+3. **Collinear targets** - FABRIK struggles when the target is on the same line
+   as a straight chain
 4. **Serial chains only** - Does not support branching topologies
-5. **Orientation solving is heuristic** - Orientation targets converge via frame propagation, which may not find optimal solutions for all arm geometries.
 
-For 6-DOF arms requiring precise orientation control, consider analytical IK or Jacobian-based methods.
+`BB.IK.DLS` remains the more reliable solver for a 6-DOF arm that must hit an
+exact pose; FABRIK's draw is that it needs no Jacobian and batches cleanly.
 
 ### Dependencies
 
