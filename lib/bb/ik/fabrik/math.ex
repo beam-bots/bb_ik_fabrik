@@ -4,104 +4,16 @@
 
 defmodule BB.IK.FABRIK.Math do
   @moduledoc """
-  Pure Nx implementation of the FABRIK algorithm.
+  Pure Nx implementation of FABRIK, constrained to a robot's real joint axes.
 
-  Provides both position-only solving (`fabrik/5`) and full frame-based
-  solving with orientation (`fabrik_with_orientation/7`).
+  `solve_constrained/3` is the entry point. `backward_pass/3` is the classic
+  FABRIK reach it builds on, kept separate because it is the one half of the
+  algorithm that needs no knowledge of how the joints are allowed to move.
   """
 
   import Nx.Defn
 
-  alias BB.Math.Quaternion
-
-  @doc """
-  Run the FABRIK algorithm on a chain of points.
-
-  ## Parameters
-
-  - `points` - Nx tensor of shape `{n+1, 3}` representing joint/link positions
-  - `lengths` - Nx tensor of shape `{n}` representing segment lengths
-  - `target` - Nx tensor of shape `{3}` representing target position
-  - `max_iterations` - Maximum number of iterations
-  - `tolerance` - Convergence tolerance (distance to target)
-
-  ## Returns
-
-  - `{:ok, new_points, meta}` - Converged successfully
-  - `{:error, :unreachable, meta}` - Target is beyond reach
-  - `{:error, :max_iterations, meta}` - Did not converge within max iterations
-
-  In all cases, `meta` contains:
-  - `:points` - Final point positions
-  - `:iterations` - Number of iterations performed
-  - `:residual` - Final distance to target
-  """
-  @spec fabrik(
-          points :: Nx.Tensor.t(),
-          lengths :: Nx.Tensor.t(),
-          target :: Nx.Tensor.t(),
-          max_iterations :: pos_integer(),
-          tolerance :: float()
-        ) ::
-          {:ok, Nx.Tensor.t(), map()}
-          | {:error, :unreachable | :max_iterations, map()}
-  def fabrik(points, lengths, target, max_iterations, tolerance) do
-    root = get_point(points, 0)
-    total_length = Nx.sum(lengths) |> Nx.to_number()
-    dist_to_target = distance(root, target) |> Nx.to_number()
-
-    if dist_to_target > total_length do
-      {:error, :unreachable,
-       %{
-         points: stretch_toward_target(points, lengths, target),
-         iterations: 0,
-         residual: dist_to_target - total_length
-       }}
-    else
-      {solved_points, iterations, residual} =
-        solve(points, lengths, target, max_iterations, tolerance)
-
-      meta = %{
-        points: solved_points,
-        iterations: Nx.to_number(iterations),
-        residual: Nx.to_number(residual)
-      }
-
-      if meta.residual <= tolerance do
-        {:ok, solved_points, meta}
-      else
-        {:error, :max_iterations, meta}
-      end
-    end
-  end
-
-  @doc """
-  Run the FABRIK iteration loop until convergence or `max_iterations`.
-
-  Composable `defn` entry point. Returns `{points, iterations, residual}` as
-  tensors — `fabrik/5` wraps this with the reachability check and `{:ok, ...}`
-  classification. Each iteration runs `backward_pass/3` then `forward_pass/3`.
-  Built from `defn` so it can be composed into larger numerical pipelines and
-  vectorised over a leading batch axis (e.g. solving many legs of a gait at
-  once).
-  """
-  @spec solve(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), pos_integer(), float()) ::
-          {Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()}
-  defn solve(points, lengths, target, max_iterations, tolerance) do
-    root = points[0]
-
-    {solved, _lengths, _target, _root, _max, _tol, iterations, residual} =
-      while {pts = points, lens = lengths, tgt = target, rt = root, max = max_iterations,
-             tol = tolerance, i = 0, residual = Nx.as_type(tolerance, :f64) + 1.0},
-            i < max and residual > tol do
-        pts = backward_pass(pts, lens, tgt)
-        pts = forward_pass(pts, lens, rt)
-        tip = pts[Nx.axis_size(pts, 0) - 1]
-        {pts, lens, tgt, rt, max, tol, i + 1, distance(tip, tgt)}
-      end
-
-    {solved, iterations, residual}
-  end
+  alias BB.Robot.Kinematics
 
   @doc """
   FABRIK backward reaching pass.
@@ -124,473 +36,14 @@ defmodule BB.IK.FABRIK.Math do
     result
   end
 
-  @doc """
-  FABRIK forward reaching pass.
-
-  Pins the root to `root`, then walks toward the end effector placing each joint
-  at its segment length from the previous. `points` is `{n, 3}`, `lengths`
-  `{n - 1}`. Returns the updated `{n, 3}` points.
-  """
-  @spec forward_pass(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
-  defn forward_pass(points, lengths, root) do
-    n = Nx.axis_size(points, 0)
-    points = Nx.put_slice(points, [0, 0], Nx.new_axis(root, 0))
-
-    {result, _lengths, _i} =
-      while {pts = points, lens = lengths, i = 0}, i < n - 1 do
-        new_point = move_point_toward(pts[i + 1], pts[i], lens[i])
-        {Nx.put_slice(pts, [i + 1, 0], Nx.new_axis(new_point, 0)), lens, i + 1}
-      end
-
-    result
-  end
-
-  # ===========================================================================
-  # Frame-based FABRIK with orientation support
-  # ===========================================================================
-
-  @doc """
-  Convert points tensor to frames with identity orientations.
-
-  Useful for using the orientation-aware algorithm with position-only data.
-  """
-  @spec points_to_frames(Nx.Tensor.t()) :: frames()
-  def points_to_frames(points) do
-    n = Nx.axis_size(points, 0)
-    identity = Quaternion.identity_tensor()
-    orientations = Nx.broadcast(identity, {n, 4})
-    %{positions: points, orientations: orientations}
-  end
-
-  @doc """
-  Extract positions tensor from frames.
-  """
-  @spec frames_to_points(frames()) :: Nx.Tensor.t()
-  def frames_to_points(frames) do
-    frames.positions
-  end
-
-  @typedoc """
-  Frame representation for orientation-aware FABRIK.
-
-  - `:positions` - Joint positions as `{n+1, 3}` tensor
-  - `:orientations` - Joint orientations as `{n+1, 4}` tensor (WXYZ quaternions)
-  """
-  @type frames :: %{positions: Nx.Tensor.t(), orientations: Nx.Tensor.t()}
-
-  @doc """
-  Run FABRIK with full orientation support.
-
-  ## Parameters
-
-  - `frames` - Map with `:positions` `{n+1, 3}` and `:orientations` `{n+1, 4}` tensors
-  - `lengths` - Segment lengths as `{n}` tensor
-  - `target_position` - Target position as `{3}` tensor
-  - `target_orientation` - Target quaternion as `Quaternion.t()` or `nil` for position-only
-  - `max_iterations` - Maximum solver iterations
-  - `tolerance` - Position convergence tolerance (metres)
-  - `opts` - Options including `:orientation_tolerance` (radians, default 0.01)
-
-  ## Returns
-
-  - `{:ok, frames, meta}` - Converged successfully
-  - `{:error, :unreachable, meta}` - Target beyond reach
-  - `{:error, :max_iterations, meta}` - Did not converge
-
-  Meta includes:
-  - `:frames` - Final frame state
-  - `:iterations` - Iterations performed
-  - `:residual` - Position residual (metres)
-  - `:orientation_residual` - Orientation residual (radians) or `nil`
-  """
-  @spec fabrik_with_orientation(
-          frames :: frames(),
-          lengths :: Nx.Tensor.t(),
-          target_position :: Nx.Tensor.t(),
-          target_orientation :: Quaternion.t() | nil,
-          max_iterations :: pos_integer(),
-          tolerance :: float(),
-          opts :: keyword()
-        ) ::
-          {:ok, frames(), map()}
-          | {:error, :unreachable | :max_iterations, map()}
-  def fabrik_with_orientation(
-        frames,
-        lengths,
-        target_position,
-        target_orientation,
-        max_iterations,
-        tolerance,
-        opts \\ []
-      ) do
-    orientation_tolerance = Keyword.get(opts, :orientation_tolerance, 0.01)
-
-    {enforce_ori, target_ori_tensor} =
-      case target_orientation do
-        nil -> {0.0, Quaternion.identity_tensor()}
-        %Quaternion{} = q -> {1.0, Quaternion.tensor(q)}
-      end
-
-    positions = frames.positions
-    orientations = frames.orientations
-
-    total_length = Nx.sum(lengths) |> Nx.to_number()
-    dist_to_target = distance(get_point(positions, 0), target_position) |> Nx.to_number()
-
-    if dist_to_target > total_length do
-      {stretched_positions, stretched_orientations, ori_residual} =
-        stretch_with_orientation(
-          positions,
-          orientations,
-          lengths,
-          target_position,
-          target_ori_tensor
-        )
-
-      {:error, :unreachable,
-       %{
-         frames: %{positions: stretched_positions, orientations: stretched_orientations},
-         iterations: 0,
-         residual: dist_to_target - total_length,
-         orientation_residual: nilify_orientation(ori_residual, enforce_ori)
-       }}
-    else
-      {solved_positions, solved_orientations, iterations, residual, ori_residual} =
-        solve_with_orientation(
-          positions,
-          orientations,
-          lengths,
-          target_position,
-          target_ori_tensor,
-          enforce_ori,
-          max_iterations,
-          tolerance,
-          orientation_tolerance
-        )
-
-      meta = %{
-        frames: %{positions: solved_positions, orientations: solved_orientations},
-        iterations: Nx.to_number(iterations),
-        residual: Nx.to_number(residual),
-        orientation_residual: nilify_orientation(Nx.to_number(ori_residual), enforce_ori)
-      }
-
-      orientation_converged =
-        enforce_ori == 0.0 or meta.orientation_residual <= orientation_tolerance
-
-      if meta.residual <= tolerance and orientation_converged do
-        {:ok, meta.frames, meta}
-      else
-        {:error, :max_iterations, meta}
-      end
-    end
-  end
-
-  defp nilify_orientation(_residual, enforce) when enforce == 0.0, do: nil
-  defp nilify_orientation(residual, _enforce), do: residual
-
-  @doc """
-  Run the orientation-aware FABRIK loop until convergence or `max_iterations`.
-
-  Composable `defn` companion to `solve/6` that also tracks a `{n, 4}` quaternion
-  per joint. `enforce_ori` (`1.0`/`0.0`) selects whether the end-effector
-  orientation is pinned to `target_orientation` and whether orientation
-  convergence is required. Returns
-  `{positions, orientations, iterations, residual, orientation_residual}` as
-  tensors; `fabrik_with_orientation/7` wraps this with reachability and `{:ok,
-  ...}` classification.
-  """
-  @spec solve_with_orientation(
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          number(),
-          pos_integer(),
-          float(),
-          float()
-        ) :: {Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()}
-  defn solve_with_orientation(
-         positions,
-         orientations,
-         lengths,
-         target_position,
-         target_orientation,
-         enforce_ori,
-         max_iterations,
-         tolerance,
-         orientation_tolerance
-       ) do
-    root_position = positions[0]
-    root_orientation = orientations[0]
-
-    {pos, ori, _l, _tp, _to, _rp, _ro, _ef, _max, _tol, _otol, iterations, residual, ori_residual} =
-      while {pos = positions, ori = orientations, lens = lengths, tp = target_position,
-             to = target_orientation, rp = root_position, ro = root_orientation, ef = enforce_ori,
-             max = max_iterations, tol = tolerance, otol = orientation_tolerance, i = 0,
-             residual = Nx.as_type(tolerance, :f64) + 1.0,
-             ori_residual = Nx.as_type(orientation_tolerance, :f64) + 1.0},
-            i < max and (residual > tol or (ef > 0.5 and ori_residual > otol)) do
-        {pos, ori} = backward_pass_with_orientation(pos, ori, lens, tp, to, ef)
-        {pos, ori} = forward_pass_with_orientation(pos, ori, lens, rp, ro)
-        last = Nx.axis_size(pos, 0) - 1
-
-        {pos, ori, lens, tp, to, rp, ro, ef, max, tol, otol, i + 1, distance(pos[last], tp),
-         angular_distance(ori[last], to)}
-      end
-
-    {pos, ori, iterations, residual, ori_residual}
-  end
-
-  @doc """
-  Orientation-aware FABRIK backward reaching pass.
-
-  Pins the end-effector to `target_position` (and, when `enforce_ori > 0.5`, to
-  `target_orientation`), then walks toward the root placing each joint and
-  aligning its frame's Z-axis with the segment direction. `positions` is
-  `{n, 3}`, `orientations` `{n, 4}` (WXYZ), `lengths` `{n - 1}`. Returns
-  `{positions, orientations}`.
-  """
-  @spec backward_pass_with_orientation(
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          number()
-        ) :: {Nx.Tensor.t(), Nx.Tensor.t()}
-  defn backward_pass_with_orientation(
-         positions,
-         orientations,
-         lengths,
-         target_position,
-         target_orientation,
-         enforce_ori
-       ) do
-    n = Nx.axis_size(positions, 0)
-    positions = Nx.put_slice(positions, [n - 1, 0], Nx.new_axis(target_position, 0))
-
-    end_orientation = Nx.select(enforce_ori > 0.5, target_orientation, orientations[n - 1])
-    orientations = Nx.put_slice(orientations, [n - 1, 0], Nx.new_axis(end_orientation, 0))
-
-    {pos, ori, _lengths, _i} =
-      while {pos = positions, ori = orientations, lens = lengths, i = n - 2}, i >= 0 do
-        p_next = pos[i + 1]
-        new_point = move_point_toward(pos[i], p_next, lens[i])
-        pos = Nx.put_slice(pos, [i, 0], Nx.new_axis(new_point, 0))
-
-        direction = compute_direction(new_point, p_next)
-        new_ori = orientation_from_direction(direction, ori[i + 1])
-        ori = Nx.put_slice(ori, [i, 0], Nx.new_axis(new_ori, 0))
-
-        {pos, ori, lens, i - 1}
-      end
-
-    {pos, ori}
-  end
-
-  @doc """
-  Orientation-aware FABRIK forward reaching pass.
-
-  Pins the root to `root_position`/`root_orientation`, then walks toward the
-  end-effector placing each joint and propagating orientation from its parent
-  along the segment direction. `positions` is `{n, 3}`, `orientations` `{n, 4}`,
-  `lengths` `{n - 1}`. Returns `{positions, orientations}`.
-  """
-  @spec forward_pass_with_orientation(
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t()
-        ) :: {Nx.Tensor.t(), Nx.Tensor.t()}
-  defn forward_pass_with_orientation(
-         positions,
-         orientations,
-         lengths,
-         root_position,
-         root_orientation
-       ) do
-    n = Nx.axis_size(positions, 0)
-    positions = Nx.put_slice(positions, [0, 0], Nx.new_axis(root_position, 0))
-    orientations = Nx.put_slice(orientations, [0, 0], Nx.new_axis(root_orientation, 0))
-
-    {pos, ori, _lengths, _i} =
-      while {pos = positions, ori = orientations, lens = lengths, i = 0}, i < n - 1 do
-        p_curr = pos[i]
-        new_point = move_point_toward(pos[i + 1], p_curr, lens[i])
-        pos = Nx.put_slice(pos, [i + 1, 0], Nx.new_axis(new_point, 0))
-
-        direction = compute_direction(p_curr, new_point)
-        new_ori = propagate_orientation(ori[i], direction)
-        ori = Nx.put_slice(ori, [i + 1, 0], Nx.new_axis(new_ori, 0))
-
-        {pos, ori, lens, i + 1}
-      end
-
-    {pos, ori}
-  end
-
-  @doc """
-  Stretch the chain straight toward an unreachable target.
-
-  Lays joints along the root→target direction at their segment lengths,
-  propagating orientation along that direction. Returns
-  `{positions, orientations, orientation_residual}` (the residual is the angular
-  distance of the end-effector orientation from `target_orientation`).
-  """
-  @spec stretch_with_orientation(
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t()
-        ) :: {Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()}
-  defn stretch_with_orientation(
-         positions,
-         orientations,
-         lengths,
-         target_position,
-         target_orientation
-       ) do
-    n = Nx.axis_size(positions, 0)
-    root = positions[0]
-    root_orientation = orientations[0]
-    unit_dir = (target_position - root) |> safe_normalise()
-
-    {pos, ori, _lengths, _unit_dir, _i} =
-      while {pos = positions, ori = orientations, lens = lengths, dir = unit_dir, i = 0},
-            i < n - 1 do
-        new_point = pos[i] + dir * lens[i]
-        pos = Nx.put_slice(pos, [i + 1, 0], Nx.new_axis(new_point, 0))
-
-        new_ori = propagate_orientation(ori[i], dir)
-        ori = Nx.put_slice(ori, [i + 1, 0], Nx.new_axis(new_ori, 0))
-
-        {pos, ori, lens, dir, i + 1}
-      end
-
-    ori = Nx.put_slice(ori, [0, 0], Nx.new_axis(root_orientation, 0))
-
-    {pos, ori, angular_distance(ori[n - 1], target_orientation)}
-  end
-
   defnp safe_normalise(vector) do
     norm = Nx.LinAlg.norm(vector)
-    vector / Nx.select(norm < 1.0e-10, 1.0, norm)
-  end
-
-  # Angular distance between two unit quaternions: 2·acos(|⟨q1, q2⟩|), matching
-  # BB.Math.Quaternion.angular_distance/2.
-  defnp angular_distance(q1, q2) do
-    dot = Nx.abs(Nx.dot(q1, q2))
-    2.0 * Nx.acos(Nx.clip(dot, 0.0, 1.0))
-  end
-
-  defnp compute_direction(from, to) do
-    direction = Nx.subtract(to, from)
-    norm = Nx.LinAlg.norm(direction)
 
     Nx.select(
       Nx.less(norm, 1.0e-10),
       Nx.tensor([0.0, 0.0, 1.0], type: :f64),
-      Nx.divide(direction, norm)
+      Nx.divide(vector, norm)
     )
-  end
-
-  defnp orientation_from_direction(direction, child_orientation) do
-    # Create rotation that aligns Z-axis with direction
-    # Start from child orientation and adjust
-    z_axis = Nx.tensor([0.0, 0.0, 1.0], type: :f64)
-
-    # If direction is close to Z-axis, use child orientation
-    dot = Nx.dot(direction, z_axis)
-
-    Nx.select(
-      Nx.greater(Nx.abs(dot), 0.9999),
-      child_orientation,
-      quaternion_from_two_vectors(z_axis, direction)
-    )
-  end
-
-  defnp propagate_orientation(parent_orientation, direction) do
-    # Compute orientation that points in the given direction
-    # relative to the parent's frame
-    z_axis = Nx.tensor([0.0, 0.0, 1.0], type: :f64)
-    dot = Nx.dot(direction, z_axis)
-
-    Nx.select(
-      Nx.greater(Nx.abs(dot), 0.9999),
-      parent_orientation,
-      quaternion_from_two_vectors(z_axis, direction)
-    )
-  end
-
-  defnp quaternion_from_two_vectors(from, to) do
-    # Compute quaternion that rotates 'from' to 'to'
-    # Both vectors should be normalised
-    cross = cross_product(from, to)
-    dot = Nx.dot(from, to)
-
-    # w = 1 + dot, xyz = cross
-    w = Nx.add(1.0, dot)
-
-    # Handle anti-parallel case (dot ≈ -1)
-    is_antiparallel = Nx.less(w, 1.0e-6)
-
-    # For anti-parallel, rotate 180° around perpendicular axis
-    perp =
-      Nx.select(
-        Nx.greater(Nx.abs(from[0]), 0.9),
-        cross_product(from, Nx.tensor([0.0, 1.0, 0.0], type: :f64)),
-        cross_product(from, Nx.tensor([1.0, 0.0, 0.0], type: :f64))
-      )
-
-    perp_norm = Nx.LinAlg.norm(perp)
-    perp_normalised = Nx.divide(perp, perp_norm)
-
-    # Normal case quaternion (unnormalised)
-    normal_quat = Nx.concatenate([Nx.reshape(w, {1}), cross])
-
-    # Anti-parallel case quaternion (180° rotation)
-    antiparallel_quat = Nx.concatenate([Nx.tensor([0.0], type: :f64), perp_normalised])
-
-    quat = Nx.select(is_antiparallel, antiparallel_quat, normal_quat)
-
-    # Normalise
-    norm = Nx.LinAlg.norm(quat)
-    Nx.divide(quat, norm)
-  end
-
-  defnp cross_product(a, b) do
-    Nx.stack([
-      Nx.subtract(Nx.multiply(a[1], b[2]), Nx.multiply(a[2], b[1])),
-      Nx.subtract(Nx.multiply(a[2], b[0]), Nx.multiply(a[0], b[2])),
-      Nx.subtract(Nx.multiply(a[0], b[1]), Nx.multiply(a[1], b[0]))
-    ])
-  end
-
-  # ===========================================================================
-  # Position-only helpers (existing)
-  # ===========================================================================
-
-  defp stretch_toward_target(points, lengths, target) do
-    n = Nx.axis_size(points, 0)
-    num_segments = n - 1
-    root = Nx.slice(points, [0, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-
-    direction = Nx.subtract(target, root)
-    dir_norm = Nx.LinAlg.norm(direction)
-    unit_dir = Nx.divide(direction, dir_norm)
-
-    Enum.reduce(0..(num_segments - 1)//1, put_point(points, 0, root), fn i, points ->
-      p_curr = get_point(points, i)
-      len = Nx.slice(lengths, [i], [1]) |> Nx.squeeze()
-
-      new_point = Nx.add(p_curr, Nx.multiply(unit_dir, len))
-      put_point(points, i + 1, new_point)
-    end)
   end
 
   @doc """
@@ -607,18 +60,258 @@ defmodule BB.IK.FABRIK.Math do
     anchor + unit_dir * desired_distance
   end
 
-  defp get_point(points, index) do
-    Nx.slice(points, [index, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-  end
-
-  defp put_point(points, index, point) do
-    point_2d = Nx.reshape(point, {1, 3})
-    indices = Nx.tensor([[index, 0], [index, 1], [index, 2]])
-    values = Nx.flatten(point_2d)
-    Nx.indexed_put(points, indices, values)
-  end
-
   defn distance(p1, p2) do
     Nx.LinAlg.norm(p1 - p2)
+  end
+
+  # ===========================================================================
+  # Constrained FABRIK
+  # ===========================================================================
+
+  @doc """
+  Run FABRIK against a chain whose joints each turn about one fixed axis.
+
+  Classic FABRIK moves points freely, as though every joint were a ball joint. A
+  robot's are not, so the point configuration it converges on generally has no
+  counterpart in any pose the robot can hold, and reading joint values back out
+  of it is a fit that starts centimetres wrong.
+
+  This keeps the backward pass — the reach that pins the end effector to the
+  target and distributes the correction back along the chain — but treats its
+  answer as a set of *desired directions* rather than positions. The forward pass
+  then walks base to tip choosing, for each joint, the rotation about its real
+  world axis that carries its links closest to those directions, clamped to its
+  limits, and regenerates the positions beyond it by forward kinematics. Every
+  pose considered is therefore one the robot can hold, and the joint values are
+  the solver's output rather than something recovered afterwards.
+
+  ## Arguments
+
+  - `chain` - the description from `BB.IK.FABRIK.Chain.kinematics/1`
+  - `target` - `%{position: {3}, rotation: {3, 3}, enforce: scalar}`, where
+    `enforce` above `0.5` asks for the orientation as well as the position
+  - `opts` - `%{max_iterations:, tolerance:, orientation_tolerance:, lever:}`
+
+  All geometry is in the chain root's frame, `target` included. Returns
+  `{positions, iterations, residual, orientation_residual}` as tensors, and
+  vectorises over a leading batch axis so a fleet of identical chains — the legs
+  of a gait, say — solves in one call with a lane per chain.
+  """
+  @spec solve_constrained(map(), map(), map()) ::
+          {Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()}
+  defn solve_constrained(chain, target, opts) do
+    # `chain.positions` seeds the loop and is not read again — `q` is the live
+    # configuration from here on.
+    {solved, _chain, _target, _opts, iterations, residual, orientation_residual} =
+      while {q = chain.positions, c = chain, t = target, o = opts, i = 0,
+             residual = tip_distance(chain.positions, chain, target),
+             orientation_residual = tip_angle(chain.positions, chain, target)},
+            i < o.max_iterations and
+              (residual > o.tolerance or
+                 (t.enforce > 0.5 and orientation_residual > o.orientation_tolerance)) do
+        swept = sweep(q, c, t, o)
+        {swept, c, t, o, i + 1, tip_distance(swept, c, t), tip_angle(swept, c, t)}
+      end
+
+    {solved, iterations, residual, orientation_residual}
+  end
+
+  defnp tip_transform(positions, chain) do
+    Nx.take(chain_transforms(positions, chain), chain.target_row, axis: 0)
+  end
+
+  defnp tip_distance(positions, chain, target) do
+    distance(tip_transform(positions, chain)[[0..2, 3]], target.position)
+  end
+
+  defnp tip_angle(positions, chain, target) do
+    frame_angle(tip_transform(positions, chain)[[0..2, 0..2]], target.rotation)
+  end
+
+  # The angle of the rotation taking one frame onto the other, read off the trace
+  # of their relative rotation. Avoids needing a quaternion inside `defn`.
+  defnp frame_angle(rotation, target_rotation) do
+    relative = Nx.dot(Nx.transpose(rotation), target_rotation)
+    cosine = (relative[0][0] + relative[1][1] + relative[2][2] - 1.0) / 2.0
+
+    Nx.acos(Nx.clip(cosine, -1.0, 1.0))
+  end
+
+  defnp chain_transforms(positions, chain) do
+    Kinematics.Defn.link_transforms(
+      positions,
+      chain.origin_rpy,
+      chain.origin_xyz,
+      chain.axes,
+      chain.is_revolute,
+      chain.is_prismatic,
+      chain.stored,
+      chain.deltas,
+      chain.parent_idx
+    )
+  end
+
+  # One backward reach to say where the chain should go, then one constrained
+  # forward sweep to go as far there as the joints allow.
+  defnp sweep(positions, chain, target, opts) do
+    transforms = chain_transforms(positions, chain)
+    tip = Nx.take(transforms, chain.target_row, axis: 0)
+    points = chain_points(transforms, chain)
+
+    # The frame points hang off where the end effector *is*, not where it is
+    # wanted, so the only thing they ask for is the turn — the reach to the
+    # target stays the real points' job and the two do not fight over it.
+    desired =
+      Nx.concatenate([
+        backward_pass(points, segment_lengths(points), target.position),
+        frame_points(tip[[0..2, 3]], target.rotation, opts.lever)
+      ])
+
+    share = orientation_share(tip, target, opts)
+
+    {swept, _chain, _desired, _share, _opts, _j} =
+      while {q = positions, c = chain, d = desired, w = share, o = opts, j = 0},
+            j < Nx.axis_size(chain.joint_rows, 0) do
+        {fit_joint(q, c, d, w, o, j), c, d, w, o, j + 1}
+      end
+
+    swept
+  end
+
+  # How much of this sweep belongs to orientation, as the share of the total
+  # overshoot that orientation accounts for once each error is measured against
+  # its own tolerance. A caller who passes a slack `:orientation_tolerance` is
+  # saying they do not much care, and this lets position have the sweep.
+  defnp orientation_share(tip, target, opts) do
+    position = distance(tip[[0..2, 3]], target.position) / opts.tolerance
+    orientation = frame_angle(tip[[0..2, 0..2]], target.rotation) / opts.orientation_tolerance
+
+    target.enforce * orientation / Nx.max(orientation + position, 1.0e-12)
+  end
+
+  defnp chain_points(transforms, chain) do
+    Nx.take(transforms, chain.point_rows, axis: 0)[[.., 0..2, 3]]
+  end
+
+  # Three points rigidly attached to a frame, one along each of its axes. Putting
+  # them where they are wanted is the same as pointing the frame where it is
+  # wanted, which lets one position fit serve orientation too. The lever sets how
+  # loudly orientation argues against position.
+  defnp frame_points(position, rotation, lever) do
+    position + lever * Nx.transpose(rotation)
+  end
+
+  defnp segment_lengths(points) do
+    n = Nx.axis_size(points, 0)
+    from = Nx.slice_along_axis(points, 0, n - 1, axis: 0)
+    to = Nx.slice_along_axis(points, 1, n - 1, axis: 0)
+
+    Nx.sum((to - from) ** 2, axes: [1]) |> Nx.sqrt()
+  end
+
+  # Choose this joint's value against the links it can actually move, measured
+  # under the values already chosen upstream. Recomputing the transforms is what
+  # keeps the choice relative to the joint's parent rather than to the world: a
+  # link's world displacement is the accumulated work of every joint above it.
+  defnp fit_joint(positions, chain, desired, share, opts, index) do
+    row = Nx.take(chain.joint_rows, index)
+    transforms = chain_transforms(positions, chain)
+    child = Nx.take(transforms, row, axis: 0)
+    tip = Nx.take(transforms, chain.target_row, axis: 0)
+
+    pivot = child[[0..2, 3]]
+    axis = safe_normalise(Nx.dot(child[[0..2, 0..2]], Nx.take(chain.axes, row, axis: 0)))
+
+    current =
+      Nx.concatenate([
+        chain_points(transforms, chain),
+        frame_points(tip[[0..2, 3]], tip[[0..2, 0..2]], opts.lever)
+      ])
+
+    # A joint turns every link beyond it. The frame points ride on the target
+    # link itself, so the last joint moves them even though it moves no point
+    # past its own.
+    downstream =
+      Nx.concatenate([
+        chain.point_rows > row,
+        Nx.broadcast(chain.target_row >= row, {3})
+      ])
+
+    offsets = current - pivot
+    wanted = desired - pivot
+
+    # A link lying on the joint's axis is carried around it without moving, so it
+    # cannot say what the angle should be and the others have to answer.
+    radial = offsets - outer(Nx.dot(offsets, axis), axis)
+    lever = Nx.sqrt(Nx.sum(radial ** 2, axes: [1]))
+    turnable = downstream and lever > 1.0e-6
+
+    prismatic? = Nx.take(chain.is_prismatic, row) > 0.5
+    usable = Nx.select(prismatic?, downstream, turnable)
+
+    weight =
+      Nx.as_type(usable, {:f, 64}) *
+        Nx.concatenate([
+          Nx.broadcast(1.0 - share, {Nx.axis_size(chain.point_rows, 0)}),
+          Nx.broadcast(share, {3})
+        ])
+
+    delta =
+      Nx.select(
+        prismatic?,
+        slide_distance(current, desired, axis, weight),
+        turn_angle(radial, wanted, axis, weight)
+      )
+
+    delta = Nx.select(Nx.any(usable), delta, 0.0)
+
+    value =
+      Nx.clip(
+        Nx.take(positions, row) + delta,
+        Nx.take(chain.limits_lower, index),
+        Nx.take(chain.limits_upper, index)
+      )
+
+    Nx.put_slice(positions, [row], Nx.reshape(value, {1}))
+  end
+
+  # Rotating by θ about the axis sends a perpendicular offset u to
+  # u·cos θ + (axis × u)·sin θ, so the θ carrying every movable link closest to
+  # where it is wanted maximises Σ (R u)·v — a stationary point at atan2 of the
+  # two accumulated terms. No search, no Jacobian.
+  #
+  # Every such link votes, weighted by its lever arm, because a single one cannot
+  # be trusted: the nearest carries the joint's own contribution but reads a
+  # backward pass position that may encode a bend this joint cannot make, while
+  # the end effector reads the true target but lets a joint claim work belonging
+  # to its children.
+  defnp turn_angle(radial, wanted, axis, weight) do
+    perpendicular = wanted - outer(Nx.dot(wanted, axis), axis)
+
+    Nx.atan2(
+      Nx.sum(weight * Nx.sum(cross_rows(axis, radial) * perpendicular, axes: [1])),
+      Nx.sum(weight * Nx.sum(radial * perpendicular, axes: [1]))
+    )
+  end
+
+  # A prismatic joint carries every link beyond it equally, so the distance to
+  # slide is the mean of what those links each ask for along the axis.
+  defnp slide_distance(current, desired, axis, weight) do
+    asked = Nx.sum((desired - current) * axis, axes: [1])
+
+    Nx.sum(weight * asked) / Nx.max(Nx.sum(weight), 1.0)
+  end
+
+  defnp(outer(scalars, vector), do: Nx.new_axis(scalars, 1) * vector)
+
+  defnp cross_rows(axis, rows) do
+    Nx.stack(
+      [
+        axis[1] * rows[[.., 2]] - axis[2] * rows[[.., 1]],
+        axis[2] * rows[[.., 0]] - axis[0] * rows[[.., 2]],
+        axis[0] * rows[[.., 1]] - axis[1] * rows[[.., 0]]
+      ],
+      axis: 1
+    )
   end
 end
