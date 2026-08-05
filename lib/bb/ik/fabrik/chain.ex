@@ -9,39 +9,20 @@ defmodule BB.IK.FABRIK.Chain do
   alias BB.Error.Kinematics.NoDofs
   alias BB.Error.Kinematics.NotAnAncestor
   alias BB.Error.Kinematics.UnknownLink
-  alias BB.Math.Quaternion
   alias BB.Math.Transform
   alias BB.Math.Vec3
   alias BB.Robot
   alias BB.Robot.{Joint, Kinematics}
 
-  defstruct [
-    :joints,
-    :joint_names,
-    :joint_point_indices,
-    :points,
-    :orientations,
-    :lengths,
-    :limits,
-    :root_transform,
-    :original_positions
-  ]
+  defstruct [:joint_names, :root_point, :root_transform, :reach, :kinematics]
 
   @type t :: %__MODULE__{
-          joints: [Joint.t()],
           joint_names: [atom()],
-          joint_point_indices: [non_neg_integer()],
-          points: Nx.Tensor.t(),
-          orientations: Nx.Tensor.t(),
-          lengths: Nx.Tensor.t(),
-          limits: [Joint.limits() | nil],
-          root_transform: Nx.Tensor.t(),
-          original_positions: %{atom() => float()}
+          root_point: Nx.Tensor.t(),
+          root_transform: Transform.t(),
+          reach: float(),
+          kinematics: map()
         }
-
-  # Threshold for treating computed deltas as zero to avoid numerical drift
-  # 1e-8 radians ≈ 5.7e-7 degrees - well below mechanical precision
-  @delta_threshold 1.0e-8
 
   @doc """
   Build a kinematic chain from a robot topology for IK solving.
@@ -73,14 +54,138 @@ defmodule BB.IK.FABRIK.Chain do
          joints = chain_joints(robot, path),
          :ok <- reject_multi_dof(joints, source_link, target_link),
          {:ok, movable} <- movable_joints(joints, target_link, length(path)) do
-      {:ok,
-       build_chain_data(
-         robot,
-         configurations,
-         Enum.map(movable, & &1.joint),
-         Enum.map(movable, & &1.name),
-         target_link
-       )}
+      chain =
+        build_chain_data(
+          robot,
+          configurations,
+          Enum.map(movable, & &1.joint),
+          Enum.map(movable, & &1.name),
+          target_link
+        )
+
+      {:ok, %{chain | kinematics: build_kinematics(joints, configurations)}}
+    end
+  end
+
+  @doc """
+  Everything `BB.Robot.Kinematics.Defn.link_transforms/9` needs to walk this
+  chain, plus the row indices that map its output back to joints and points.
+
+  One row per link, root-first so a link's parent always precedes it: row 0 is
+  the source link, carrying an identity joint, and row `j + 1` is the child of
+  the chain's `j`th joint. Fixed joints get a row too — their motion is the
+  identity, which is what lets a target link sitting past one be just another
+  row rather than a special case.
+
+  - `:joint_rows` - row per movable joint, in `joint_names` order
+  - `:point_rows` - rows used as FABRIK points (source link, each movable joint's
+    child, and the target link), with consecutive duplicates collapsed
+  - `:limits_lower` / `:limits_upper` - per movable joint, infinite where unset
+  """
+  @spec kinematics(t()) :: map()
+  def kinematics(%__MODULE__{kinematics: kinematics}), do: kinematics
+
+  defp build_kinematics(path_joints, configurations) do
+    rows = [nil | Enum.map(path_joints, & &1.joint)]
+    names = [nil | Enum.map(path_joints, & &1.name)]
+    row_count = length(rows)
+
+    joint_rows =
+      path_joints
+      |> Enum.with_index(1)
+      |> Enum.filter(fn {%{joint: joint}, _row} -> Joint.movable?(joint) end)
+      |> Enum.map(fn {_joint, row} -> row end)
+
+    movable = Enum.map(joint_rows, &Enum.at(rows, &1))
+
+    %{
+      positions: tensor(Enum.zip(rows, names), &row_position(&1, configurations)),
+      origin_rpy: tensor(rows, &row_origin(&1, :orientation)),
+      origin_xyz: tensor(rows, &row_origin(&1, :position)),
+      axes: tensor(rows, &row_axis/1),
+      is_revolute: tensor(rows, &row_mask(&1, [:revolute, :continuous])),
+      is_prismatic: tensor(rows, &row_mask(&1, [:prismatic])),
+      stored: Nx.broadcast(Nx.eye(4, type: :f64), {row_count, 4, 4}),
+      deltas: Nx.broadcast(Nx.tensor(0.0, type: :f64), {row_count, 6}),
+      parent_idx: Nx.tensor([0 | Enum.to_list(0..(row_count - 2))], type: :s32),
+      joint_rows: Nx.tensor(joint_rows, type: :s32),
+      point_rows: Nx.tensor(point_rows(joint_rows, row_count), type: :s32),
+      limits_lower: tensor(movable, &limit(&1, :lower, :neg_infinity)),
+      limits_upper: tensor(movable, &limit(&1, :upper, :infinity)),
+      target_row: Nx.tensor(row_count - 1, type: :s32)
+    }
+  end
+
+  @doc """
+  Read a solved position tensor back into a map of joint name to value.
+
+  The inverse of the `:positions` row the chain description hands to the solver:
+  only this chain's movable joints appear, in `joint_names` order.
+  """
+  @spec configurations(t(), Nx.Tensor.t()) :: %{atom() => float()}
+  def configurations(%__MODULE__{} = chain, positions) do
+    chain.kinematics.joint_rows
+    |> Nx.to_flat_list()
+    |> Enum.zip(chain.joint_names)
+    |> Map.new(fn {row, name} -> {name, Nx.to_number(positions[row])} end)
+  end
+
+  @doc """
+  Drop the chain's joint limits, for a solve asked not to respect them.
+  """
+  @spec without_limits(map()) :: map()
+  def without_limits(kinematics) do
+    %{
+      kinematics
+      | limits_lower: Nx.broadcast(:neg_infinity, Nx.shape(kinematics.limits_lower)),
+        limits_upper: Nx.broadcast(:infinity, Nx.shape(kinematics.limits_upper))
+    }
+  end
+
+  defp tensor(items, fun), do: items |> Enum.map(fun) |> Nx.tensor(type: :f64)
+
+  # The source link and the last movable joint's child collapse into the target
+  # link's row whenever they are the same link, and a point repeated in place
+  # would give the backward pass a zero-length segment to take a direction from.
+  defp point_rows(joint_rows, row_count) do
+    ([0] ++ joint_rows ++ [row_count - 1])
+    |> Enum.dedup()
+  end
+
+  defp row_position({nil, _name}, _configurations), do: 0.0
+
+  defp row_position({_joint, name}, configurations) do
+    case Map.get(configurations, name, 0.0) do
+      value when is_number(value) -> value * 1.0
+      _ -> 0.0
+    end
+  end
+
+  defp row_origin(nil, _key), do: [0.0, 0.0, 0.0]
+
+  defp row_origin(%Joint{origin: origin}, key) do
+    case origin do
+      %{^key => {a, b, c}} -> [a, b, c]
+      _ -> [0.0, 0.0, 0.0]
+    end
+  end
+
+  defp row_axis(nil), do: [0.0, 0.0, 1.0]
+
+  defp row_axis(%Joint{axis: axis}) do
+    {x, y, z} = axis || {0.0, 0.0, 1.0}
+    [x, y, z]
+  end
+
+  defp row_mask(nil, _types), do: 0.0
+  defp row_mask(%Joint{type: type}, types), do: if(type in types, do: 1.0, else: 0.0)
+
+  # An unlimited joint gets an infinite bound rather than a sentinel, so clamping
+  # is the same arithmetic whether or not a limit was declared.
+  defp limit(%Joint{limits: limits}, key, unlimited) do
+    case limits do
+      %{^key => value} when is_number(value) -> value
+      _ -> unlimited
     end
   end
 
@@ -117,469 +222,29 @@ defmodule BB.IK.FABRIK.Chain do
     end
   end
 
-  @doc """
-  Convert FABRIK solution points back to joint positions.
-
-  Takes the solved point positions and computes the joint angles/distances
-  that would produce those positions.
-
-  ## Parameters
-
-  - `robot` - The BB.Robot struct
-  - `chain` - The original chain struct
-  - `solved_points` - Nx tensor of solved positions `{n+1, 3}`
-  - `respect_limits?` - Whether to clamp values to joint limits
-
-  ## Returns
-
-  Map of joint names to positions (radians for revolute, metres for prismatic).
-  """
-  @spec points_to_positions(Robot.t(), t(), Nx.Tensor.t(), boolean()) :: %{atom() => float()}
-  def points_to_positions(%Robot{} = robot, %__MODULE__{} = chain, solved_points, respect_limits?) do
-    chain.joint_names
-    |> Enum.with_index()
-    |> Enum.reduce(%{}, fn {joint_name, idx}, acc ->
-      {:ok, joint} = Robot.get_joint(robot, joint_name)
-      compute_and_add_position(acc, joint_name, idx, joint, chain, solved_points, respect_limits?)
-    end)
-  end
-
-  @doc """
-  Convert FABRIK solution frames back to joint positions.
-
-  Like `points_to_positions/4` but accepts the frames map format
-  from `Math.fabrik_with_orientation/7`.
-
-  ## Parameters
-
-  - `robot` - The BB.Robot struct
-  - `chain` - The original chain struct
-  - `frames` - Map with `:positions` and `:orientations` tensors
-  - `respect_limits?` - Whether to clamp values to joint limits
-
-  ## Returns
-
-  Map of joint names to positions (radians for revolute, metres for prismatic).
-  """
-  @spec frames_to_positions(Robot.t(), t(), map(), boolean()) :: %{atom() => float()}
-  def frames_to_positions(%Robot{} = robot, %__MODULE__{} = chain, frames, respect_limits?) do
-    chain.joint_names
-    |> Enum.with_index()
-    |> Enum.reduce(%{}, fn {joint_name, idx}, acc ->
-      {:ok, joint} = Robot.get_joint(robot, joint_name)
-
-      compute_and_add_position_from_frames(
-        acc,
-        joint_name,
-        idx,
-        joint,
-        chain,
-        frames,
-        respect_limits?
-      )
-    end)
-  end
-
-  defp compute_and_add_position_from_frames(
-         acc,
-         _joint_name,
-         _idx,
-         %Joint{} = joint,
-         _chain,
-         _frames,
-         _respect_limits?
-       )
-       when joint.type == :fixed do
-    acc
-  end
-
-  defp compute_and_add_position_from_frames(
-         acc,
-         joint_name,
-         idx,
-         joint,
-         chain,
-         frames,
-         respect_limits?
-       ) do
-    point_idx = Enum.at(chain.joint_point_indices, idx, 0)
-    num_points = Nx.axis_size(frames.positions, 0)
-
-    # Check if this joint shares its point with other joints (co-located)
-    is_colocated = colocated_joint?(chain.joint_point_indices, idx)
-
-    # Get segment length (from point_idx to point_idx+1)
-    segment_length =
-      if point_idx < Nx.axis_size(chain.lengths, 0) do
-        chain.lengths[point_idx] |> Nx.to_number()
-      else
-        0.0
-      end
-
-    delta =
-      cond do
-        # Fixed joint - no delta
-        joint.type == :fixed ->
-          0.0
-
-        # Out of bounds - no delta
-        point_idx >= num_points - 1 ->
-          0.0
-
-        # Co-located joint or zero-length segment - use orientation-based extraction
-        # This handles spherical shoulders/wrists where multiple joints share a point
-        is_colocated or segment_length < 1.0e-6 ->
-          compute_angle_from_orientations(chain, frames, point_idx, joint)
-
-        # Non-zero segment with unique point - use position-based extraction
-        true ->
-          compute_joint_position(chain, frames.positions, point_idx, joint)
-      end
-
-    delta = if abs(delta) < @delta_threshold, do: 0.0, else: delta
-
-    original_position = Map.get(chain.original_positions, joint_name, 0.0)
-    position = original_position + delta
-    clamped = maybe_clamp(position, joint.limits, respect_limits?)
-    Map.put(acc, joint_name, clamped)
-  end
-
-  defp colocated_joint?(joint_point_indices, idx) do
-    # A joint is co-located if another joint shares the same point index
-    point_idx = Enum.at(joint_point_indices, idx)
-
-    joint_point_indices
-    |> Enum.with_index()
-    |> Enum.any?(fn {other_point_idx, other_idx} ->
-      other_idx != idx and other_point_idx == point_idx
-    end)
-  end
-
-  defp compute_angle_from_orientations(chain, frames, point_idx, joint) do
-    # For co-located joints, extract joint angle from the direction change.
-    #
-    # Note: We use direction-based extraction instead of orientation at the point
-    # because FABRIK pins the root orientation in the forward pass. The direction
-    # change captures the actual rotation that occurred.
-
-    # Direction from current point to next point
-    p_joint = get_point(frames.positions, point_idx)
-    p_next = get_point(frames.positions, point_idx + 1)
-    direction = Nx.subtract(p_next, p_joint)
-
-    orig_p_joint = get_point(chain.points, point_idx)
-    orig_p_next = get_point(chain.points, point_idx + 1)
-    orig_direction = Nx.subtract(orig_p_next, orig_p_joint)
-
-    # Compute angle between original and solved directions, projected onto joint axis
-    joint_axis = joint.axis || {0.0, 0.0, 1.0}
-
-    joint_axis_tensor =
-      Nx.tensor([elem(joint_axis, 0), elem(joint_axis, 1), elem(joint_axis, 2)], type: :f64)
-
-    # Project directions onto plane perpendicular to joint axis
-    orig_projected = project_onto_plane(orig_direction, joint_axis_tensor)
-    solved_projected = project_onto_plane(direction, joint_axis_tensor)
-
-    orig_norm = Nx.LinAlg.norm(orig_projected) |> Nx.to_number()
-    solved_norm = Nx.LinAlg.norm(solved_projected) |> Nx.to_number()
-
-    # When either projection is near-zero (singularity), return 0
-    # This happens when direction aligns with joint axis
-    if orig_norm < 1.0e-10 or solved_norm < 1.0e-10 do
-      0.0
-    else
-      orig_unit = Nx.divide(orig_projected, orig_norm)
-      solved_unit = Nx.divide(solved_projected, solved_norm)
-
-      dot = Nx.dot(orig_unit, solved_unit) |> Nx.to_number()
-      dot = max(-1.0, min(1.0, dot))
-
-      cross = cross_product(orig_unit, solved_unit)
-      cross_dot_axis = Nx.dot(cross, joint_axis_tensor) |> Nx.to_number()
-
-      angle = :math.acos(dot)
-      if cross_dot_axis < 0, do: -angle, else: angle
-    end
-  end
-
-  defp compute_and_add_position(
-         acc,
-         _joint_name,
-         _idx,
-         %Joint{} = joint,
-         _chain,
-         _solved_points,
-         _respect_limits?
-       )
-       when joint.type == :fixed do
-    acc
-  end
-
-  defp compute_and_add_position(
-         acc,
-         joint_name,
-         idx,
-         joint,
-         chain,
-         solved_points,
-         respect_limits?
-       ) do
-    # Get the point index for this joint (handles co-located joints)
-    point_idx = Enum.at(chain.joint_point_indices, idx, 0)
-    num_points = Nx.axis_size(solved_points, 0)
-
-    # Ensure we have valid indices: need point_idx and point_idx+1
-    delta =
-      if point_idx < num_points - 1 do
-        compute_joint_position(chain, solved_points, point_idx, joint)
-      else
-        0.0
-      end
-
-    # Apply deadband to avoid numerical drift from tiny computed deltas
-    delta = if abs(delta) < @delta_threshold, do: 0.0, else: delta
-
-    original_position = Map.get(chain.original_positions, joint_name, 0.0)
-    position = original_position + delta
-    clamped = maybe_clamp(position, joint.limits, respect_limits?)
-    Map.put(acc, joint_name, clamped)
-  end
-
-  defp maybe_clamp(position, limits, true), do: clamp_to_limits(position, limits)
-  defp maybe_clamp(position, _limits, false), do: position
-
   defp build_chain_data(robot, positions, joints, joint_names, target_link) do
     transforms = Kinematics.all_link_transforms(robot, positions)
+    root_link = List.first(joints).parent_link
 
-    # Build points from joint child links plus the final target link
-    # This gives us meaningful segment lengths between joints
-    #
-    # For a chain: base -> shoulder_joint -> link1 -> elbow_joint -> link2 -> tip_joint -> tip
-    # We want points at: [link1, link2, tip] with segments between them
-    #
-    # Each joint controls the angle at its parent link, affecting the child link position
-
-    # Start with the first joint's parent link (the base/root)
-    first_joint = List.first(joints)
-    root_transform = transforms[first_joint.parent_link]
-    root_point = Transform.get_translation(root_transform)
-    root_orientation = extract_orientation(root_transform)
-
-    # Get positions and orientations of each joint's child link
-    child_link_data =
-      Enum.map(joints, fn joint ->
-        transform = transforms[joint.child_link]
-        {Transform.get_translation(transform), extract_orientation(transform)}
-      end)
-
-    child_link_points = Enum.map(child_link_data, &elem(&1, 0))
-    child_link_orientations = Enum.map(child_link_data, &elem(&1, 1))
-
-    # The final point is the target link
-    end_effector_transform = transforms[target_link]
-    end_effector_point = Transform.get_translation(end_effector_transform)
-    end_effector_orientation = extract_orientation(end_effector_transform)
-
-    # Combine all points and orientations, deduplicating consecutive identical points
-    # but tracking which original index maps to which deduplicated index
-    all_points = [root_point] ++ child_link_points ++ [end_effector_point]
-    all_orientations = [root_orientation] ++ child_link_orientations ++ [end_effector_orientation]
-
-    # Remove consecutive duplicate points (within tolerance), keeping corresponding orientations
-    # and tracking the index mapping
-    {points_list, orientations_list, original_to_deduped} =
-      dedupe_consecutive_points_with_orientations_and_mapping(all_points, all_orientations)
-
-    # Build joint_point_indices: for each joint, which deduped point index does it control?
-    # Joint j's position = child_link_points[j] = original index (j + 1)
-    # After deduplication, we need the deduped index for original point (j + 1)
-    joint_point_indices =
-      Enum.with_index(joints)
-      |> Enum.map(fn {_joint, j} ->
-        Map.get(original_to_deduped, j + 1, 0)
-      end)
-
+    # How far the target link can get from the chain root: the chain laid out
+    # straight, measured link origin to link origin. Anything further away is
+    # beyond the arm however its joints are arranged.
     points =
-      points_list
-      |> Enum.map(fn %Vec3{} = v -> Vec3.to_list(v) end)
-      |> Nx.tensor(type: :f64)
+      ([root_link] ++ Enum.map(joints, & &1.child_link) ++ [target_link])
+      |> Enum.map(&Transform.get_translation(transforms[&1]))
 
-    orientations =
-      orientations_list
-      |> Enum.map(&Nx.to_flat_list/1)
-      |> Nx.tensor(type: :f64)
-
-    n = length(points_list)
-
-    lengths =
-      if n > 1 do
-        0..(n - 2)
-        |> Enum.map(fn i ->
-          p1 = Nx.slice(points, [i, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-          p2 = Nx.slice(points, [i + 1, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-          Nx.subtract(p2, p1) |> Nx.LinAlg.norm() |> Nx.to_number()
-        end)
-        |> Nx.tensor(type: :f64)
-      else
-        Nx.tensor([], type: :f64)
-      end
-
-    limits = Enum.map(joints, & &1.limits)
+    reach =
+      points
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.map(fn [from, to] -> to |> Vec3.subtract(from) |> Vec3.magnitude() end)
+      |> Enum.sum()
 
     %__MODULE__{
-      joints: joints,
       joint_names: joint_names,
-      joint_point_indices: joint_point_indices,
-      points: points,
-      orientations: orientations,
-      lengths: lengths,
-      limits: limits,
-      root_transform: root_transform,
-      original_positions: positions
+      root_point: points |> List.first() |> Vec3.tensor(),
+      root_transform: transforms[root_link],
+      reach: reach,
+      kinematics: nil
     }
   end
-
-  defp extract_orientation(transform) do
-    Quaternion.tensor(Transform.get_quaternion(transform))
-  end
-
-  @doc """
-  Convert chain to frames format for use with Math.fabrik_with_orientation.
-  """
-  @spec to_frames(t()) :: %{positions: Nx.Tensor.t(), orientations: Nx.Tensor.t()}
-  def to_frames(%__MODULE__{} = chain) do
-    %{positions: chain.points, orientations: chain.orientations}
-  end
-
-  defp dedupe_consecutive_points_with_orientations_and_mapping(points, orientations) do
-    combined = Enum.zip(points, orientations) |> Enum.with_index()
-
-    {deduped, mapping, _last_point, _deduped_idx} =
-      Enum.reduce(combined, {[], %{}, nil, 0}, fn {{point, ori}, orig_idx},
-                                                  {acc, map, last_point, deduped_idx} ->
-        if last_point == nil or not points_equal?(last_point, point) do
-          # New unique point - add it and update mapping
-          new_map = Map.put(map, orig_idx, deduped_idx)
-          {[{point, ori} | acc], new_map, point, deduped_idx + 1}
-        else
-          # Duplicate point - map to previous deduped index
-          new_map = Map.put(map, orig_idx, deduped_idx - 1)
-          {acc, new_map, last_point, deduped_idx}
-        end
-      end)
-
-    deduped = Enum.reverse(deduped)
-    {Enum.map(deduped, &elem(&1, 0)), Enum.map(deduped, &elem(&1, 1)), mapping}
-  end
-
-  defp points_equal?(%Vec3{} = p1, %Vec3{} = p2) do
-    tolerance = 1.0e-6
-
-    abs(Vec3.x(p1) - Vec3.x(p2)) < tolerance and
-      abs(Vec3.y(p1) - Vec3.y(p2)) < tolerance and
-      abs(Vec3.z(p1) - Vec3.z(p2)) < tolerance
-  end
-
-  defp compute_joint_position(chain, solved_points, idx, joint) do
-    # Points are: [root, child_of_joint0, child_of_joint1, ..., end_effector]
-    # For joint at point index idx:
-    # - The joint controls the direction from its point (idx) to the next point (idx+1)
-    # - This represents the segment from the joint's child link to the next link
-    p_joint = get_point(solved_points, idx)
-    p_next = get_point(solved_points, idx + 1)
-
-    orig_p_joint = get_point(chain.points, idx)
-    orig_p_next = get_point(chain.points, idx + 1)
-
-    case joint.type do
-      type when type in [:revolute, :continuous] ->
-        compute_revolute_angle(orig_p_joint, orig_p_next, p_joint, p_next, joint.axis)
-
-      :prismatic ->
-        compute_prismatic_distance(orig_p_joint, orig_p_next, p_joint, p_next, joint.axis)
-
-      _ ->
-        0.0
-    end
-  end
-
-  defp compute_revolute_angle(orig_joint, orig_child, new_joint, new_child, axis) do
-    axis = axis || {0.0, 0.0, 1.0}
-    axis_tensor = Nx.tensor([elem(axis, 0), elem(axis, 1), elem(axis, 2)], type: :f64)
-
-    orig_dir = Nx.subtract(orig_child, orig_joint)
-    new_dir = Nx.subtract(new_child, new_joint)
-
-    orig_projected = project_onto_plane(orig_dir, axis_tensor)
-    new_projected = project_onto_plane(new_dir, axis_tensor)
-
-    orig_norm = Nx.LinAlg.norm(orig_projected) |> Nx.to_number()
-    new_norm = Nx.LinAlg.norm(new_projected) |> Nx.to_number()
-
-    if orig_norm < 1.0e-10 or new_norm < 1.0e-10 do
-      0.0
-    else
-      orig_unit = Nx.divide(orig_projected, orig_norm)
-      new_unit = Nx.divide(new_projected, new_norm)
-
-      dot = Nx.dot(orig_unit, new_unit) |> Nx.to_number()
-      dot = max(-1.0, min(1.0, dot))
-
-      cross = cross_product(orig_unit, new_unit)
-      cross_dot_axis = Nx.dot(cross, axis_tensor) |> Nx.to_number()
-
-      angle = :math.acos(dot)
-      if cross_dot_axis < 0, do: -angle, else: angle
-    end
-  end
-
-  defp compute_prismatic_distance(_orig_joint, _orig_child, new_joint, new_child, axis) do
-    axis = axis || {0.0, 0.0, 1.0}
-    axis_tensor = Nx.tensor([elem(axis, 0), elem(axis, 1), elem(axis, 2)], type: :f64)
-
-    displacement = Nx.subtract(new_child, new_joint)
-    Nx.dot(displacement, axis_tensor) |> Nx.to_number()
-  end
-
-  defp project_onto_plane(vector, normal) do
-    dot = Nx.dot(vector, normal)
-    projection = Nx.multiply(normal, dot)
-    Nx.subtract(vector, projection)
-  end
-
-  defp cross_product(a, b) do
-    a0 = Nx.slice(a, [0], [1]) |> Nx.squeeze()
-    a1 = Nx.slice(a, [1], [1]) |> Nx.squeeze()
-    a2 = Nx.slice(a, [2], [1]) |> Nx.squeeze()
-
-    b0 = Nx.slice(b, [0], [1]) |> Nx.squeeze()
-    b1 = Nx.slice(b, [1], [1]) |> Nx.squeeze()
-    b2 = Nx.slice(b, [2], [1]) |> Nx.squeeze()
-
-    Nx.stack([
-      Nx.subtract(Nx.multiply(a1, b2), Nx.multiply(a2, b1)),
-      Nx.subtract(Nx.multiply(a2, b0), Nx.multiply(a0, b2)),
-      Nx.subtract(Nx.multiply(a0, b1), Nx.multiply(a1, b0))
-    ])
-  end
-
-  defp get_point(points, index) do
-    Nx.slice(points, [index, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-  end
-
-  defp clamp_to_limits(value, nil), do: value
-  defp clamp_to_limits(value, %{lower: nil, upper: nil}), do: value
-
-  defp clamp_to_limits(value, %{lower: lower, upper: upper}) do
-    value
-    |> maybe_clamp_lower(lower)
-    |> maybe_clamp_upper(upper)
-  end
-
-  defp maybe_clamp_lower(value, nil), do: value
-  defp maybe_clamp_lower(value, lower), do: max(value, lower)
-
-  defp maybe_clamp_upper(value, nil), do: value
-  defp maybe_clamp_upper(value, upper), do: min(value, upper)
 end

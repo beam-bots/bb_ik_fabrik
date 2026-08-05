@@ -134,19 +134,39 @@ FABRIK works best with **simple planar or spatial arms** where:
 - **3-link arms**: Shoulder + elbow + wrist with distinct positions
 - **SCARA-style arms**: Horizontal joints with vertical offsets
 - **Simple grippers**: Where the end-effector is offset from the last joint
-- **Arms with co-located joints** (spherical wrists/shoulders): Handled via orientation-based angle extraction
+- **Arms with co-located joints** (spherical wrists/shoulders): Each joint is fitted about its own axis, so sharing a point costs nothing
 
-### Limited Support
+- **6-DOF anthropomorphic arms** (e.g., WidowX, Kinova): position targets solve to
+  tolerance; full pose targets are the hardest case and converge less often
 
-- **6-DOF anthropomorphic arms** (e.g., WidowX, Kinova): FABRIK converges in point-space but may not find kinematically valid configurations. The algorithm distributes movement toward the end-effector rather than through shoulder/elbow rotation.
+## How a target is solved
+
+Classic FABRIK moves points as though every joint were a ball joint, so the
+configuration it settles on generally has no counterpart in any pose the robot
+can hold. For a position target this implementation keeps FABRIK's backward
+reach but treats its answer as *desired directions*: the forward pass walks base
+to tip choosing, for each joint, the rotation about its real world axis that
+carries its links closest to those directions, clamped to its limits, and
+regenerates the positions beyond it by forward kinematics.
+
+Every pose considered is therefore one the robot can actually hold, and the joint
+values are the solver's output rather than something recovered from a point cloud
+afterwards.
+
+Orientation rides the same fit: three points sit rigidly on the target link's
+axes, and putting them where they are wanted is the same as pointing the frame
+where it is wanted.
 
 ## Limitations
 
 - **Serial chains only**: Does not support branching topologies
-- **No joint axis constraints**: FABRIK moves points to satisfy distance constraints without fully respecting joint rotation axes. This means the algorithm may find geometrically valid point configurations that don't correspond to achievable robot poses.
+- **Convergence is not guaranteed**: a minority of solves exhaust
+  `:max_iterations` rather than reaching tolerance, and return best-effort
+  positions with `reached: false`
+- **Cost**: constraining costs iterations — tens rather than a handful, each one a
+  forward-kinematics pass per joint. Batch with `Nx.vectorize/2` when solving
+  many chains, such as the legs of a gait
 - **Collinear targets**: FABRIK can struggle when the target lies on the same line as a straight chain
-- **Mostly-vertical configurations**: Arms that start nearly vertical (like many 6-DOF arms at home position) may have poor convergence because FABRIK tends to bend the end-effector joints rather than the shoulder/elbow.
-- **Orientation solving is heuristic**: Orientation targets converge via frame propagation, which may not find optimal solutions for all arm geometries.
 
 ### When to Use a Different Solver
 

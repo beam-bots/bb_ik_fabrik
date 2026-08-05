@@ -5,176 +5,120 @@
 defmodule BB.IK.FABRIK.MathTest do
   use ExUnit.Case, async: true
 
+  alias BB.IK.FABRIK.Chain
   alias BB.IK.FABRIK.Math
+  alias BB.IK.TestRobots.ThreeLinkArm
+  alias BB.Robot.Kinematics
 
-  describe "fabrik/5" do
-    test "converges for simple 2-segment chain to reachable target" do
-      # Two segments: base at origin, lengths 1.0 and 1.0
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
+  describe "solve_constrained/3" do
+    setup do
+      robot = ThreeLinkArm.robot()
+      zero = %{joint1: 0.0, joint2: 0.0, joint3: 0.0}
+      {:ok, chain} = Chain.build(robot, zero, :base_link, :tip)
 
-      lengths = Nx.tensor([1.0, 1.0], type: :f64)
-      target = Nx.tensor([1.5, 1.0, 0.0], type: :f64)
+      # base_link is the robot's root, so the chain frame is the world frame and
+      # targets need no conversion.
+      target = fn configurations ->
+        {x, y, z} = Kinematics.link_position(robot, configurations, :tip)
 
-      assert {:ok, solved_points, meta} = Math.fabrik(points, lengths, target, 50, 1.0e-4)
+        %{
+          position: Nx.tensor([x, y, z], type: :f64),
+          rotation: Nx.eye(3, type: :f64),
+          enforce: Nx.tensor(0.0, type: :f64)
+        }
+      end
 
-      assert meta.iterations > 0
-      assert meta.residual < 1.0e-4
+      opts = fn tolerance, max_iterations ->
+        %{
+          max_iterations: max_iterations,
+          tolerance: tolerance,
+          orientation_tolerance: 0.01,
+          lever: tolerance / 0.01
+        }
+      end
 
-      # End effector should be at target
-      end_effector = Nx.slice(solved_points, [2, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      diff = Nx.subtract(end_effector, target) |> Nx.LinAlg.norm() |> Nx.to_number()
-      assert diff < 1.0e-4
-
-      # Root should remain at origin
-      root = Nx.slice(solved_points, [0, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      root_diff = Nx.LinAlg.norm(root) |> Nx.to_number()
-      assert root_diff < 1.0e-6
+      %{chain: chain, kinematics: Chain.kinematics(chain), target: target, opts: opts}
     end
 
-    test "returns unreachable error when target is too far" do
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
+    # The point of constraining the solve: every pose it considers is one the
+    # robot can actually hold, so it can land on the configuration that generated
+    # the target rather than on a fit to something unreachable.
+    test "recovers the configuration that produced the target", ctx do
+      truth = %{joint1: 0.3, joint2: 0.4, joint3: 0.5}
 
-      lengths = Nx.tensor([1.0, 1.0], type: :f64)
-      # Target at distance 5.0, but chain can only reach 2.0
-      target = Nx.tensor([5.0, 0.0, 0.0], type: :f64)
+      {solved, _iterations, residual, _orientation_residual} =
+        Math.solve_constrained(ctx.kinematics, ctx.target.(truth), ctx.opts.(1.0e-9, 500))
 
-      assert {:error, :unreachable, meta} = Math.fabrik(points, lengths, target, 50, 1.0e-4)
+      assert Nx.to_number(residual) <= 1.0e-9
 
-      assert meta.residual > 2.0
-      assert Map.has_key?(meta, :points)
+      for {joint, value} <- Chain.configurations(ctx.chain, solved) do
+        assert_in_delta value, Map.fetch!(truth, joint), 1.0e-4
+      end
     end
 
-    test "returns max_iterations error when not converged" do
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
+    test "keeps every joint inside its limits", ctx do
+      # Behind and below the base, so the fit wants angles the arm cannot hold.
+      behind = %{
+        position: Nx.tensor([-0.3, -0.2, -0.3], type: :f64),
+        rotation: Nx.eye(3, type: :f64),
+        enforce: Nx.tensor(0.0, type: :f64)
+      }
 
-      lengths = Nx.tensor([1.0, 1.0], type: :f64)
-      target = Nx.tensor([1.5, 1.0, 0.0], type: :f64)
+      {solved, _iterations, _residual, _orientation_residual} =
+        Math.solve_constrained(ctx.kinematics, behind, ctx.opts.(1.0e-4, 200))
 
-      # Only 1 iteration with tight tolerance
-      assert {:error, :max_iterations, meta} = Math.fabrik(points, lengths, target, 1, 1.0e-10)
+      configurations = Chain.configurations(ctx.chain, solved)
+      lower = Nx.to_flat_list(ctx.kinematics.limits_lower)
+      upper = Nx.to_flat_list(ctx.kinematics.limits_upper)
 
-      assert meta.iterations == 1
+      for {{_joint, value}, index} <- Enum.with_index(configurations) do
+        assert value >= Enum.at(lower, index) - 1.0e-9
+        assert value <= Enum.at(upper, index) + 1.0e-9
+      end
     end
 
-    test "handles single-segment chain" do
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
+    # The gait case: one call, a lane per leg, each converging at its own rate.
+    test "solves a batch of chains against their own targets", ctx do
+      truths = [
+        %{joint1: 0.3, joint2: 0.4, joint3: 0.5},
+        %{joint1: -0.6, joint2: 0.9, joint3: -0.3},
+        %{joint1: 0.1, joint2: -0.5, joint3: 0.8}
+      ]
 
-      lengths = Nx.tensor([1.0], type: :f64)
-      target = Nx.tensor([0.0, 1.0, 0.0], type: :f64)
+      targets = Enum.map(truths, ctx.target)
 
-      assert {:ok, solved_points, meta} = Math.fabrik(points, lengths, target, 50, 1.0e-4)
+      batched_target = %{
+        position: Nx.vectorize(Nx.stack(Enum.map(targets, & &1.position)), :leg),
+        rotation: Nx.eye(3, type: :f64),
+        enforce: Nx.tensor(0.0, type: :f64)
+      }
 
-      assert meta.residual < 1.0e-4
+      batched = %{
+        ctx.kinematics
+        | positions:
+            Nx.vectorize(
+              Nx.tensor(List.duplicate(Nx.to_flat_list(ctx.kinematics.positions), 3), type: :f64),
+              :leg
+            )
+      }
 
-      # End effector should be at target
-      end_effector = Nx.slice(solved_points, [1, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      diff = Nx.subtract(end_effector, target) |> Nx.LinAlg.norm() |> Nx.to_number()
-      assert diff < 1.0e-4
-    end
+      {solved, _iterations, residual, _orientation_residual} =
+        Math.solve_constrained(batched, batched_target, ctx.opts.(1.0e-4, 500))
 
-    test "handles 3D target" do
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 2.0]
-          ],
-          type: :f64
-        )
+      for r <- Nx.devectorize(residual) |> Nx.to_flat_list() do
+        assert r <= 1.0e-4
+      end
 
-      lengths = Nx.tensor([1.0, 1.0], type: :f64)
-      target = Nx.tensor([1.0, 1.0, 1.0], type: :f64)
+      # A lane must be worth exactly what the same chain is worth on its own.
+      devectorised = Nx.devectorize(solved)
 
-      assert {:ok, solved_points, meta} = Math.fabrik(points, lengths, target, 50, 1.0e-4)
+      for {target, leg} <- Enum.with_index(targets) do
+        {alone, _iterations, _residual, _orientation_residual} =
+          Math.solve_constrained(ctx.kinematics, target, ctx.opts.(1.0e-4, 500))
 
-      assert meta.residual < 1.0e-4
-
-      end_effector = Nx.slice(solved_points, [2, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      diff = Nx.subtract(end_effector, target) |> Nx.LinAlg.norm() |> Nx.to_number()
-      assert diff < 1.0e-4
-    end
-
-    test "converges for longer chain" do
-      # 5-segment chain
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
-            [3.0, 0.0, 0.0],
-            [4.0, 0.0, 0.0],
-            [5.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
-
-      lengths = Nx.tensor([1.0, 1.0, 1.0, 1.0, 1.0], type: :f64)
-      target = Nx.tensor([3.0, 3.0, 0.0], type: :f64)
-
-      assert {:ok, _solved_points, meta} = Math.fabrik(points, lengths, target, 100, 1.0e-4)
-
-      assert meta.residual < 1.0e-4
-    end
-
-    test "preserves segment lengths" do
-      points =
-        Nx.tensor(
-          [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0]
-          ],
-          type: :f64
-        )
-
-      lengths = Nx.tensor([1.0, 1.0], type: :f64)
-      target = Nx.tensor([1.0, 1.5, 0.0], type: :f64)
-
-      assert {:ok, solved_points, _meta} = Math.fabrik(points, lengths, target, 50, 1.0e-4)
-
-      # Check segment lengths are preserved
-      p0 = Nx.slice(solved_points, [0, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      p1 = Nx.slice(solved_points, [1, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-      p2 = Nx.slice(solved_points, [2, 0], [1, 3]) |> Nx.squeeze(axes: [0])
-
-      len1 = Nx.subtract(p1, p0) |> Nx.LinAlg.norm() |> Nx.to_number()
-      len2 = Nx.subtract(p2, p1) |> Nx.LinAlg.norm() |> Nx.to_number()
-
-      assert_in_delta len1, 1.0, 1.0e-6
-      assert_in_delta len2, 1.0, 1.0e-6
+        assert Nx.all_close(devectorised[leg], alone) |> Nx.to_number() == 1,
+               "leg #{leg} disagrees with the same chain solved on its own"
+      end
     end
   end
 end

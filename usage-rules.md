@@ -89,11 +89,17 @@ robot = MyRobot.Robot.robot()
 {:ok, state} = BB.Robot.State.new(robot)
 
 case BB.IK.FABRIK.solve(robot, state, :gripper, {0.4, 0.2, 0.1}) do
-  {:ok, positions, meta} -> {positions, meta.iterations}
+  {:ok, positions, %{reached: true}} -> {:reachable, positions}
+  {:ok, positions, %{reached: false, residual: r}} -> {:missed_by, positions, r}
   {:error, %BB.Error.Kinematics.Unreachable{residual: r}} -> {:out_of_reach, r}
   {:error, %BB.Error.Kinematics.NoSolution{residual: r}} -> {:no_convergence, r}
 end
 ```
+
+`{:ok, _, _}` on its own does not mean the target was hit. FABRIK converges on a
+chain of ball joints, and the closest pose a robot's fixed joint axes can hold to
+that answer may still be short of it — `reached` compares the measured residual
+against the `:tolerance` you asked for, so it is the field to branch on.
 
 ## Continuous tracking
 

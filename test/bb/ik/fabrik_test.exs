@@ -58,14 +58,33 @@ defmodule BB.IK.FABRIKTest do
                FABRIK.solve(robot, positions, :base_link, :tip, target)
 
       assert meta.reached == true
-      # FABRIK converges in point-space, but converting to joint angles
-      # and back through FK introduces some error
-      assert meta.residual < 0.1
+      assert meta.residual < 1.0e-4
 
-      # Verify with FK - allow reasonable tolerance
       {x, y, _z} = Kinematics.link_position(robot, solved_positions, :tip)
-      assert_in_delta x, 0.3, 0.1
-      assert_in_delta y, 0.3, 0.1
+      assert_in_delta x, 0.3, 1.0e-4
+      assert_in_delta y, 0.3, 1.0e-4
+    end
+
+    # `reached` was a literal `true`, which made the one field callers use to
+    # decide whether a target was achieved incapable of reporting a miss. Tucked
+    # in beside the shoulder is inside the reach sphere — so not refused as
+    # unreachable — but closer than the arm can fold, which is exactly the case
+    # the flag has to be able to say no to.
+    test "reports reached: false when the solve misses the requested tolerance" do
+      robot = ThreeLinkArm.robot()
+      positions = %{joint1: 0.0, joint2: 0.0, joint3: 0.0}
+      target = Vec3.new(0.02, 0.01, 0.05)
+
+      assert {:ok, solved, meta} = FABRIK.solve(robot, positions, :base_link, :tip, target)
+
+      assert meta.reached == false
+      assert meta.residual > 1.0e-4
+
+      # Best-effort positions still come back, and the residual describes where
+      # they actually put the tip.
+      {x, y, z} = Kinematics.link_position(robot, solved, :tip)
+      distance = :math.sqrt((x - 0.02) ** 2 + (y - 0.01) ** 2 + (z - 0.05) ** 2)
+      assert_in_delta meta.residual, distance, 1.0e-9
     end
 
     test "returns error for unreachable target" do
@@ -738,15 +757,9 @@ defmodule BB.IK.FABRIKTest do
       # The planar base is still composed into the forward kinematics even though
       # it was not part of the chain, so the tip lands near the base rather than
       # near the origin.
-      #
-      # The tolerance is loose because FABRIK's own accuracy is poor and unrelated
-      # to this: it reports `reached: true` alongside residuals hundreds of times
-      # the requested tolerance, for ordinary root-scoped solves on an all-revolute
-      # arm. Tightening this would be asserting FABRIK's numerical quality rather
-      # than what this test is about.
       {x, y, _z} = Kinematics.link_position(robot, solved, :tip)
-      assert_in_delta x, 1.35, 0.2
-      assert_in_delta y, 2.2, 0.2
+      assert_in_delta x, 1.35, 1.0e-4
+      assert_in_delta y, 2.2, 1.0e-4
     end
   end
 end

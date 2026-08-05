@@ -15,7 +15,7 @@ defmodule BB.IK.FABRIK do
 
   - Works with `BB.Robot.State` or plain position maps
   - Position and orientation solving (quaternion or axis constraints)
-  - Handles co-located joints via orientation-based angle extraction
+  - Handles co-located joints by fitting each about its own axis
   - Respects joint limits by clamping solved values
   - Uses Nx tensors for efficient computation
   - Returns best-effort positions even on failure
@@ -55,12 +55,16 @@ defmodule BB.IK.FABRIK do
 
   - Serial chains only (no branching topologies)
   - Revolute and prismatic joints (fixed joints are skipped)
-  - Orientation solving is heuristic and may not find optimal solutions for all geometries
+  - Only position targets respect joint axes. An orientation target still solves
+    in point space and fits joint values afterwards, so its result may not
+    correspond to a pose the robot can hold — `meta.reached` says which
+  - Constraining costs iterations, so a solve takes tens rather than a handful.
+    `BB.IK.FABRIK.Math.solve_constrained/4` vectorises over a batch axis when
+    many chains need solving at once
   """
 
   @behaviour BB.IK.Solver
 
-  alias BB.Error.Kinematics.NoSolution
   alias BB.Error.Kinematics.Unreachable
   alias BB.IK.FABRIK.{Chain, Math}
   alias BB.Math.Quaternion
@@ -71,6 +75,7 @@ defmodule BB.IK.FABRIK do
 
   @default_max_iterations 50
   @default_tolerance 1.0e-4
+  @default_orientation_tolerance 0.01
 
   @impl true
   @spec solve(Robot.t(), State.t() | map(), atom(), atom(), BB.IK.Solver.target(), keyword()) ::
@@ -84,11 +89,6 @@ defmodule BB.IK.FABRIK do
 
   def solve(%Robot{} = robot, positions, source_link, target_link, target, opts)
       when is_map(positions) do
-    max_iterations = Keyword.get(opts, :max_iterations, @default_max_iterations)
-    tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
-    orientation_tolerance = Keyword.get(opts, :orientation_tolerance, 0.01)
-    respect_limits? = Keyword.get(opts, :respect_limits, true)
-
     {target_point, orientation_target} = normalize_target(target)
 
     case Chain.build(robot, positions, source_link, target_link) do
@@ -96,136 +96,118 @@ defmodule BB.IK.FABRIK do
         {:error, error}
 
       {:ok, chain} ->
-        result =
-          run_fabrik(
-            chain,
-            target_point,
-            orientation_target,
-            max_iterations,
-            tolerance,
-            orientation_tolerance
-          )
+        shortfall = reach_shortfall(chain, target_point)
 
-        case result do
-          {:ok, solved_data, fabrik_meta} ->
-            joint_positions = extract_joint_positions(robot, chain, solved_data, respect_limits?)
-            merged_positions = Map.merge(positions, joint_positions)
-            residual = compute_residual(robot, merged_positions, target_link, target_point)
-
-            meta = %{
-              iterations: fabrik_meta.iterations,
-              residual: residual,
-              orientation_residual: fabrik_meta[:orientation_residual],
-              reached: true
-            }
-
-            {:ok, merged_positions, meta}
-
-          {:error, :unreachable, fabrik_meta} ->
-            joint_positions = extract_joint_positions(robot, chain, fabrik_meta, respect_limits?)
-            merged_positions = Map.merge(positions, joint_positions)
-            residual = compute_residual(robot, merged_positions, target_link, target_point)
-
-            {:error,
-             %Unreachable{
-               target_link: target_link,
-               target_pose: target,
-               reason: "Target beyond workspace",
-               iterations: fabrik_meta.iterations,
-               residual: residual,
-               positions: merged_positions
-             }}
-
-          {:error, :max_iterations, fabrik_meta} ->
-            joint_positions = extract_joint_positions(robot, chain, fabrik_meta, respect_limits?)
-            merged_positions = Map.merge(positions, joint_positions)
-            residual = compute_residual(robot, merged_positions, target_link, target_point)
-
-            {:error,
-             %NoSolution{
-               target_link: target_link,
-               target_pose: target,
-               iterations: fabrik_meta.iterations,
-               residual: residual,
-               positions: merged_positions
-             }}
+        if shortfall > 0.0 do
+          {:error,
+           %Unreachable{
+             target_link: target_link,
+             target_pose: target,
+             reason: "Target beyond workspace",
+             iterations: 0,
+             residual: shortfall,
+             positions: positions
+           }}
+        else
+          run(robot, chain, positions, target_point, orientation_target, target_link, opts)
         end
     end
   end
 
-  # Always use orientation-aware FABRIK internally, even for position-only targets.
-  # This tracks orientations at each joint, enabling proper angle extraction for
-  # co-located joints (like spherical shoulders/wrists) via frames_to_positions.
-  defp run_fabrik(
-         chain,
-         target_point,
-         orientation_target,
-         max_iterations,
-         tolerance,
-         orientation_tolerance
-       ) do
-    frames = Chain.to_frames(chain)
+  defp run(robot, chain, positions, target_point, orientation_target, target_link, opts) do
+    max_iterations = Keyword.get(opts, :max_iterations, @default_max_iterations)
+    tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
 
-    target_quaternion =
-      case orientation_target do
-        :none -> nil
-        _ -> orientation_to_quaternion(orientation_target, frames)
-      end
+    orientation_tolerance =
+      Keyword.get(opts, :orientation_tolerance, @default_orientation_tolerance)
 
-    result =
-      Math.fabrik_with_orientation(
-        frames,
-        chain.lengths,
-        target_point,
-        target_quaternion,
-        max_iterations,
-        tolerance,
-        orientation_tolerance: orientation_tolerance
+    respect_limits? = Keyword.get(opts, :respect_limits, true)
+
+    kinematics = Chain.kinematics(chain)
+    kinematics = if respect_limits?, do: kinematics, else: Chain.without_limits(kinematics)
+
+    {solved, iterations, residual, orientation_residual} =
+      Math.solve_constrained(
+        kinematics,
+        chain_frame(chain, target_point, orientation_target, robot, positions, target_link),
+        %{
+          max_iterations: max_iterations,
+          tolerance: tolerance,
+          orientation_tolerance: orientation_tolerance,
+          # Trading a radian of orientation against a metre of position needs a
+          # length, and the chain's own reach is the scale that matters. Much
+          # shorter and the frame points sit almost on the end effector, so
+          # orientation is outvoted by position; much longer and it drowns
+          # position out. Half the reach sits in the middle of what works.
+          lever: chain.reach / 2.0
+        }
       )
 
-    case result do
-      {:ok, frames, meta} -> {:ok, frames, meta}
-      {:error, reason, meta} -> {:error, reason, Map.put(meta, :frames, meta.frames)}
-    end
+    residual = Nx.to_number(residual)
+
+    orientation_residual =
+      if orientation_target == :none, do: nil, else: Nx.to_number(orientation_residual)
+
+    meta = %{
+      iterations: Nx.to_number(iterations),
+      residual: residual,
+      orientation_residual: orientation_residual,
+      reached:
+        residual <= tolerance and
+          orientation_reached?(orientation_residual, orientation_tolerance)
+    }
+
+    {:ok, Map.merge(positions, Chain.configurations(chain, solved)), meta}
   end
 
-  defp orientation_to_quaternion({:quaternion, q}, _frames), do: q
+  # The solver works wholly in the chain root's frame, so the target moves into
+  # it rather than every link moving out of it.
+  defp chain_frame(chain, target_point, orientation_target, robot, positions, target_link) do
+    inverse = chain.root_transform |> Transform.inverse() |> Transform.tensor()
+    homogeneous = Nx.concatenate([target_point, Nx.tensor([1.0], type: :f64)])
+    rotation = target_rotation(orientation_target, robot, positions, target_link)
 
-  defp orientation_to_quaternion({:axis, axis_vec}, frames) do
-    # Get current end-effector orientation (last in chain)
-    n = Nx.axis_size(frames.orientations, 0)
-
-    current_quat_tensor =
-      Nx.slice(frames.orientations, [n - 1, 0], [1, 4]) |> Nx.squeeze(axes: [0])
-
-    current_quat = Quaternion.from_tensor(current_quat_tensor)
-
-    # Current tool direction (Z-axis in end-effector's local frame)
-    current_z = Quaternion.rotate_vector(current_quat, Vec3.unit_z())
-
-    # Normalise target axis
-    target_axis = Vec3.normalise(axis_vec)
-
-    # Compute minimum rotation to align current Z with target axis
-    rotation = Quaternion.from_two_vectors(current_z, target_axis)
-
-    # Apply rotation to current orientation to get target orientation
-    Quaternion.multiply(rotation, current_quat)
+    %{
+      position: inverse |> Nx.dot(homogeneous) |> Nx.slice([0], [3]),
+      rotation: Nx.dot(inverse[[0..2, 0..2]], rotation),
+      enforce: enforce_orientation(orientation_target)
+    }
   end
 
-  # Success - frames map with positions and orientations
-  defp extract_joint_positions(
-         robot,
-         chain,
-         %{positions: _, orientations: _} = frames,
-         respect_limits?
-       ) do
-    Chain.frames_to_positions(robot, chain, frames, respect_limits?)
+  defp enforce_orientation(:none), do: Nx.tensor(0.0, type: :f64)
+  defp enforce_orientation(_orientation), do: Nx.tensor(1.0, type: :f64)
+
+  # An unenforced orientation still needs a well-formed rotation to travel beside
+  # the position; the identity costs nothing and keeps one code path.
+  defp target_rotation(:none, _robot, _positions, _target_link), do: Nx.eye(3, type: :f64)
+
+  defp target_rotation({:quaternion, quaternion}, _robot, _positions, _target_link) do
+    Quaternion.to_rotation_matrix(quaternion)
   end
 
-  # Error case - meta map contains :frames key
-  defp extract_joint_positions(robot, chain, %{frames: frames}, respect_limits?) do
-    extract_joint_positions(robot, chain, frames, respect_limits?)
+  # An axis target names where the tool should point rather than a whole
+  # orientation, so it resolves against the pose the robot is in now: the least
+  # rotation swinging the tool's Z onto that axis.
+  defp target_rotation({:axis, axis_vec}, robot, positions, target_link) do
+    current =
+      robot
+      |> Kinematics.forward_kinematics(positions, target_link)
+      |> Transform.get_quaternion()
+
+    current
+    |> Quaternion.rotate_vector(Vec3.unit_z())
+    |> Quaternion.from_two_vectors(Vec3.normalise(axis_vec))
+    |> Quaternion.multiply(current)
+    |> Quaternion.to_rotation_matrix()
+  end
+
+  # How far past the chain's own reach the target sits. Positive means no pose
+  # can touch it, however the joints are arranged.
+  defp reach_shortfall(chain, target_point) do
+    distance =
+      target_point |> Nx.subtract(chain.root_point) |> Nx.LinAlg.norm() |> Nx.to_number()
+
+    distance - chain.reach
   end
 
   @doc """
@@ -283,9 +265,6 @@ defmodule BB.IK.FABRIK do
   defp normalize_orientation({:axis, %Vec3{} = vec}), do: {:axis, vec}
   defp normalize_orientation({:quaternion, %Quaternion{} = q}), do: {:quaternion, q}
 
-  defp compute_residual(robot, positions, target_link, target_point) do
-    {x, y, z} = Kinematics.link_position(robot, positions, target_link)
-    actual = Nx.tensor([x, y, z], type: :f64)
-    Nx.subtract(actual, target_point) |> Nx.LinAlg.norm() |> Nx.to_number()
-  end
+  defp orientation_reached?(nil, _tolerance), do: true
+  defp orientation_reached?(residual, tolerance), do: residual <= tolerance
 end
