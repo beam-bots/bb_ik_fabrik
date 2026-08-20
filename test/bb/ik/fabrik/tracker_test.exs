@@ -7,6 +7,8 @@ defmodule BB.IK.FABRIK.TrackerTest do
 
   alias BB.IK.FABRIK.Tracker
   alias BB.Math.Vec3
+  alias BB.Robot.Kinematics
+  alias BB.Robot.Runtime
 
   defmodule TrackerTestRobot do
     @moduledoc false
@@ -173,6 +175,38 @@ defmodule BB.IK.FABRIK.TrackerTest do
 
       # Process should be stopped
       refute Process.alive?(pid)
+    end
+
+    test "returns the configuration the last solve arrived at, not the robot's" do
+      start_supervised!(TrackerTestRobot)
+
+      {:ok, pid} =
+        Tracker.start_link(
+          robot: TrackerTestRobot,
+          target_link: :tip,
+          source_link: :base_link,
+          initial_target: Vec3.new(0.35, 0.2, 0.0)
+        )
+
+      Process.sleep(100)
+
+      assert {:ok, solved} = Tracker.stop(pid)
+
+      # The mock actuators discard their commands and publish no motion for the
+      # estimators to interpolate, so the robot has not moved and its own
+      # configuration is still the one it booted in. Reading `stop/1`'s answer
+      # off the robot - as the tracker used to - would therefore hand back these
+      # zeroes rather than anything the solver worked out.
+      measured = Runtime.configurations(TrackerTestRobot)
+      assert Enum.all?(Map.values(measured), &(&1 == 0.0))
+
+      assert solved.shoulder_joint != 0.0
+      assert solved.elbow_joint != 0.0
+
+      # And it really is a solution, not just a non-zero pair: the tracked link
+      # sits on the target when the robot is in the configuration handed back.
+      {x, y, z} = Kinematics.link_position(TrackerTestRobot.robot(), solved, :tip)
+      assert Vec3.distance(Vec3.new(x, y, z), Vec3.new(0.35, 0.2, 0.0)) < 0.01
     end
 
     test "can request hold commands on stop" do
