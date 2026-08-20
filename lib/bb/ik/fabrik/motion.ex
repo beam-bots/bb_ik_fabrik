@@ -14,13 +14,13 @@ defmodule BB.IK.FABRIK.Motion do
       # Move end-effector to target position
       case BB.IK.FABRIK.Motion.move_to(MyRobot, :gripper, {0.3, 0.2, 0.1}, source_link: :base_link) do
         {:ok, meta} -> IO.puts("Reached in \#{meta.iterations} iterations")
-        {:error, reason, _meta} -> IO.puts("Failed: \#{reason}")
+        {:error, error} -> IO.puts("Failed: \#{Exception.message(error)}")
       end
 
       # Just solve without moving (for validation)
       case BB.IK.FABRIK.Motion.solve(MyRobot, :gripper, {0.3, 0.2, 0.1}, source_link: :base_link) do
         {:ok, positions, meta} -> IO.inspect(positions)
-        {:error, reason, _meta} -> IO.puts("Unreachable: \#{reason}")
+        {:error, error} -> IO.puts("Unreachable: \#{Exception.message(error)}")
       end
 
   ## Multiple Targets (for gait, coordinated motion)
@@ -29,7 +29,7 @@ defmodule BB.IK.FABRIK.Motion do
 
       case BB.IK.FABRIK.Motion.move_to_multi(MyRobot, targets, source_link: :base_link) do
         {:ok, results} -> IO.puts("All targets reached")
-        {:error, failed, reason, _} -> IO.puts("Failed: \#{failed}: \#{reason}")
+        {:error, error} -> IO.puts("Failed: \#{Exception.message(error)}")
       end
 
   ## In Custom Commands
@@ -42,8 +42,8 @@ defmodule BB.IK.FABRIK.Motion do
           {:ok, meta} ->
             {:stop, :normal, %{state | result: %{residual: meta.residual}}}
 
-          {:error, reason, _meta} ->
-            {:stop, :normal, %{state | result: {:error, reason}}}
+          {:error, error} ->
+            {:stop, :normal, %{state | result: {:error, error}}}
         end
       end
 
@@ -62,8 +62,8 @@ defmodule BB.IK.FABRIK.Motion do
   @type robot_or_context :: module() | Context.t()
   @type targets :: %{atom() => target()}
 
-  @type motion_result :: {:ok, meta()} | {:error, atom(), meta()}
-  @type solve_result :: {:ok, positions(), meta()} | {:error, atom(), meta()}
+  @type motion_result :: Motion.motion_result()
+  @type solve_result :: Motion.solve_result()
   @type multi_motion_result :: Motion.multi_motion_result()
   @type multi_solve_result :: Motion.multi_solve_result()
 
@@ -90,12 +90,20 @@ defmodule BB.IK.FABRIK.Motion do
     scope past them or use a Jacobian-based solver such as `BB.IK.DLS`
 
   Motion:
-  - `:delivery` - How to send actuator commands: `:pubsub` (default), `:direct`, or `:sync`
+  - `:delivery` - How to send actuator commands. `:pubsub` (default) publishes
+    each command and waits for the actuator to accept it, reporting the first
+    refusal; `:direct` casts to each actuator and waits for nothing, so a
+    refusal is never reported
+  - `:timeout` - How long to wait for each actuator to accept its command, in
+    milliseconds (default 5000). Unused under `:direct`. A timeout exits the
+    caller, as `GenServer.call/3` does
 
   ## Returns
 
   - `{:ok, meta}` - Successfully moved; meta contains solver info
-  - `{:error, reason, meta}` - Failed to reach target
+  - `{:error, error}` - Either the target couldn't be solved, in which case the
+    error is a `BB.Error.Kinematics` struct, or an actuator refused the command
+    it was sent, in which case it is the actuator's own error
 
   ## Examples
 
@@ -132,7 +140,7 @@ defmodule BB.IK.FABRIK.Motion do
   ## Returns
 
   - `{:ok, positions, meta}` - Successfully solved
-  - `{:error, reason, meta}` - Failed to solve
+  - `{:error, error}` - Failed to solve; a struct from `BB.Error.Kinematics`
 
   ## Examples
 
@@ -144,7 +152,7 @@ defmodule BB.IK.FABRIK.Motion do
         {:ok, _positions, %{reached: false, residual: residual}} ->
           IO.puts("Close but not exact, residual: \#{residual}m")
 
-        {:error, :unreachable, _meta} ->
+        {:error, %BB.Error.Kinematics.Unreachable{}} ->
           IO.puts("Target is out of reach")
       end
   """
@@ -167,9 +175,16 @@ defmodule BB.IK.FABRIK.Motion do
   ## Returns
 
   - `{:ok, results}` - All targets solved; results is a map of link → `{:ok, positions, meta}`
-  - `{:error, failed_link, reason, results}` - A target failed
+  - `{:error, %BB.Error.Kinematics.MultiFailed{}}` - A target failed to solve.
+    The error names the link that failed, carries the underlying kinematics
+    error, and keeps the results of the targets solved before it
+  - `{:error, error}` - Every target solved, but an actuator refused the command
+    it was sent, so the failure arrives as the actuator's own error rather than
+    wrapped in `MultiFailed`
 
   ## Examples
+
+      alias BB.Error.Kinematics.MultiFailed
 
       targets = %{
         left_foot: {0.1, 0.0, 0.0},
@@ -180,8 +195,11 @@ defmodule BB.IK.FABRIK.Motion do
         {:ok, results} ->
           IO.puts("All limbs positioned")
 
-        {:error, failed_link, reason, _results} ->
-          IO.puts("Failed to reach \#{failed_link}: \#{reason}")
+        {:error, %MultiFailed{failed_link: link} = error} ->
+          IO.puts("Failed to reach \#{link}: \#{Exception.message(error)}")
+
+        {:error, error} ->
+          IO.puts("An actuator refused: \#{Exception.message(error)}")
       end
   """
   @spec move_to_multi(robot_or_context(), targets(), keyword()) :: multi_motion_result()
@@ -202,9 +220,13 @@ defmodule BB.IK.FABRIK.Motion do
   ## Returns
 
   - `{:ok, results}` - All targets solved
-  - `{:error, failed_link, reason, results}` - A target failed
+  - `{:error, %BB.Error.Kinematics.MultiFailed{}}` - A target failed. The error
+    names the link that failed, carries the underlying kinematics error, and
+    keeps the results of the targets solved before it
 
   ## Examples
+
+      alias BB.Error.Kinematics.MultiFailed
 
       targets = %{left_foot: {0.1, 0.0, 0.0}, right_foot: {-0.1, 0.0, 0.0}}
 
@@ -214,8 +236,8 @@ defmodule BB.IK.FABRIK.Motion do
             IO.puts("\#{link}: \#{meta.residual}m residual")
           end)
 
-        {:error, failed_link, reason, _results} ->
-          IO.puts("\#{failed_link} unreachable: \#{reason}")
+        {:error, %MultiFailed{failed_link: link} = error} ->
+          IO.puts("\#{link} is unreachable: \#{Exception.message(error)}")
       end
   """
   @spec solve_multi(robot_or_context(), targets(), keyword()) :: multi_solve_result()
@@ -235,7 +257,7 @@ defmodule BB.IK.FABRIK.Motion do
       |> Keyword.merge(Keyword.take(opts, [:max_iterations, :tolerance, :respect_limits]))
 
     opts
-    |> Keyword.take([:delivery])
+    |> Keyword.take([:delivery, :timeout])
     |> Keyword.merge(fabrik_opts)
     |> Keyword.put(:solver, FABRIK)
     |> Keyword.put(:source_link, source_link)
