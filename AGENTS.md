@@ -73,6 +73,9 @@ BB.IK.FABRIK (public API)
   - `update_target/2` - Update target position in real-time
   - `status/1` - Get current tracking status
   - `stop/1` - Stop tracking and optionally hold actuators
+  - Requires position feedback on the tracked joints - each solve seeds from the
+    robot's configuration, which only `JointState` messages write. See the
+    moduledoc for what a frozen seed costs
 
 ### Usage Example
 
