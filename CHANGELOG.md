@@ -11,6 +11,13 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.8.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.7.0...v0.8.0) (2026-08-22)
+### Breaking Changes:
+
+* match bb's synchronous `set_position` changes (#98) by James Harton
+
+
+
 ## [v0.7.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.6.0...v0.7.0) (2026-08-05)
 ### Breaking Changes:
 

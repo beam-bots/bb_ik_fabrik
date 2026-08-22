@@ -9,7 +9,7 @@ defmodule BB.IK.FABRIK.MixProject do
   FABRIK-based inverse kinematics solver for Beam Bots.
   """
 
-  @version "0.7.0"
+  @version "0.8.0"
 
   def project do
     [
