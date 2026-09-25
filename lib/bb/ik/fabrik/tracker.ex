@@ -274,7 +274,7 @@ defmodule BB.IK.FABRIK.Tracker do
 
   defp send_hold_commands(state) do
     Enum.each(state.robot.actuators, fn {name, _info} ->
-      BB.Actuator.hold!(state.robot_module, name)
+      BB.Actuator.hold(state.robot_module, name, delivery: :direct)
     end)
   end
 end
