@@ -11,6 +11,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.8.1](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.8.0...v0.8.1) (2026-10-12)
+
+
+
+
+### Bug Fixes:
+
+* follow core's actuator command delivery unification (#118) by James Harton
+
 ## [v0.8.0](https://github.com/beam-bots/bb_ik_fabrik/compare/v0.7.0...v0.8.0) (2026-08-22)
 ### Breaking Changes:
 
