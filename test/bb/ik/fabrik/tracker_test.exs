@@ -141,6 +141,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
   describe "status/1" do
     test "returns tracking status" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -151,8 +152,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
           update_rate: 10
         )
 
-      # Give it a moment to run at least one solve
-      Process.sleep(150)
+      assert_receive :tracker_ticked, 5_000
 
       status = Tracker.status(pid)
 
@@ -160,6 +160,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
       assert status.target == Vec3.new(0.35, 0.2, 0.0)
       assert status.update_rate == 10
       assert is_integer(status.iterations)
+      assert status.iterations > 0
 
       Tracker.stop(pid)
     end
@@ -168,6 +169,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
   describe "stop/2" do
     test "stops the tracker and returns final positions" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -177,8 +179,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
-      # Give it a moment to solve
-      Process.sleep(100)
+      assert_receive :tracker_ticked, 5_000
 
       assert {:ok, positions} = Tracker.stop(pid)
       assert is_map(positions)
@@ -189,6 +190,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
 
     test "returns the configuration the last solve arrived at, not the robot's" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -198,7 +200,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
-      Process.sleep(100)
+      assert_receive :tracker_ticked, 5_000
 
       assert {:ok, solved} = Tracker.stop(pid)
 
@@ -221,6 +223,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
 
     test "can request hold commands on stop" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -230,7 +233,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
           initial_target: Vec3.new(0.35, 0.2, 0.0)
         )
 
-      Process.sleep(100)
+      assert_receive :tracker_ticked, 5_000
 
       # Should not raise even with hold: true
       assert {:ok, _positions} = Tracker.stop(pid, hold: true)
@@ -240,6 +243,7 @@ defmodule BB.IK.FABRIK.TrackerTest do
   describe "continuous tracking" do
     test "tracks target updates over time" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -250,17 +254,15 @@ defmodule BB.IK.FABRIK.TrackerTest do
           update_rate: 20
         )
 
-      # Let it run for a bit
-      Process.sleep(100)
-
       status1 = Tracker.status(pid)
       assert status1.target == Vec3.new(0.35, 0.2, 0.0)
 
-      # Update to a new target
       Tracker.update_target(pid, Vec3.new(0.25, 0.25, 0.0))
 
-      # Let it track the new target
-      Process.sleep(100)
+      # Any tick reported before `update_target/2` replied may have solved for the
+      # old target; only one started after it is proof of a solve for the new one.
+      flush_tracker_ticks()
+      assert_receive :tracker_ticked, 5_000
 
       status2 = Tracker.status(pid)
 
@@ -270,13 +272,16 @@ defmodule BB.IK.FABRIK.TrackerTest do
       # Should still be tracking
       assert status2.tracking == true
 
-      Tracker.stop(pid)
+      assert {:ok, solved} = Tracker.stop(pid)
+      {x, y, z} = Kinematics.link_position(TrackerTestRobot.robot(), solved, :tip)
+      assert Vec3.distance(Vec3.new(x, y, z), Vec3.new(0.25, 0.25, 0.0)) < 0.01
     end
   end
 
   describe "solver options" do
     test "passes options to FABRIK solver" do
       start_supervised!(TrackerTestRobot)
+      notify_on_tracker_tick()
 
       {:ok, pid} =
         Tracker.start_link(
@@ -289,14 +294,43 @@ defmodule BB.IK.FABRIK.TrackerTest do
           respect_limits: true
         )
 
-      # Give it time to run
-      Process.sleep(100)
+      assert_receive :tracker_ticked, 5_000
 
       status = Tracker.status(pid)
       # Should have run with limited iterations
       assert status.iterations <= 10
 
       Tracker.stop(pid)
+    end
+  end
+
+  # `BB.Loop` emits nothing on its first tick, so the first event arrives at the
+  # start of the second - inside the tracker, after the first solve has finished.
+  defp notify_on_tracker_tick do
+    handler_id = "fabrik-tracker-test-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:bb, :loop, :tick],
+      fn
+        _event, _measurements, %{robot: TrackerTestRobot, path: [:ik_tracker, :tip]}, _config ->
+          send(test_pid, :tracker_ticked)
+
+        _event, _measurements, _metadata, _config ->
+          :ok
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp flush_tracker_ticks do
+    receive do
+      :tracker_ticked -> flush_tracker_ticks()
+    after
+      0 -> :ok
     end
   end
 end
